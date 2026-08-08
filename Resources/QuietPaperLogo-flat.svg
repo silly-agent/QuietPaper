@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">Quiet Paper</title>
+  <desc id="description">A flat geometric Q formed from a folded paper ribbon.</desc>
+
+  <rect x="24" y="24" width="976" height="976" rx="220" fill="#173F3A"/>
+
+  <circle
+    cx="466"
+    cy="458"
+    r="264"
+    fill="none"
+    stroke="#F5EBDD"
+    stroke-width="136"
+  />
+
+  <path d="M 500 548 L 832 824 L 660 824 L 432 612 Z" fill="#F5EBDD"/>
+  <path d="M 500 548 L 660 680 L 660 824 L 432 612 Z" fill="#E66A4E"/>
+</svg>

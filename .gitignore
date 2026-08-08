@@ -1,0 +1,41 @@
+.DS_Store
+**/.DS_Store
+
+# Swift Package Manager / Xcode
+.build/
+.build-*/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+
+# Packaged applications and local previews
+dist/
+.preview/
+
+# Local agent/editor state
+.claude/
+.codewhale/
+.idea/
+.vscode/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Quiet Paper user data and backups
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-wal
+*.db-shm
+/attachments/
+/backups/
+
+# Unused logo explorations; the app icon and flat SVG remain versioned
+Resources/QuietPaperLogo*.png
