@@ -8,6 +8,19 @@
 
 Quiet Paper 适合按“项目 / 模块 / 文件”整理长期资料。它不是云笔记服务，没有账号体系，日常编辑、搜索、附件和备份都直接落在自己的 Mac 上。
 
+## 下载
+
+[前往 Releases 下载最新版](https://github.com/silly-agent/QuietPaper/releases/latest)
+
+每个版本提供两份应用包：
+
+- Apple Silicon：适用于芯片名称为 M1、M2、M3、M4 或后续 M 系列的 Mac。
+- Intel：适用于“关于本机”中处理器显示为 Intel 的 Mac。
+
+下载对应的 ZIP，解压后把 `QuietPaper.app` 拖入“应用程序”即可。当前公开包使用 ad-hoc 签名；第一次打开时如果 macOS 提示无法验证开发者，请在 Finder 中右键应用并选择“打开”。正式的 Developer ID 签名与 Apple 公证配置完成后，这一步会自动消失。
+
+[查看所有历史版本](https://github.com/silly-agent/QuietPaper/releases)。压缩包旁的 `.sha256` 文件可用于核对下载内容是否完整。
+
 ## 能做什么
 
 - 用 Markdown 写笔记，在编辑和阅读预览之间切换。
@@ -117,6 +130,8 @@ scripts                            测试与打包脚本
 ## 参与开发
 
 提交改动前请先运行 `./scripts/run-tests.sh`。涉及数据库的测试必须使用内存数据库，不要让开发或测试脚本指向用户的正式数据目录。
+
+版本标签推送后，GitHub Actions 会在原生 Apple Silicon 与 Intel runner 上分别构建应用并创建 Release。维护步骤和 Apple 公证所需配置见 [发布说明](docs/RELEASING.md)。
 
 ## License
 

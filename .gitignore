@@ -12,6 +12,7 @@ DerivedData/
 # Packaged applications and local previews
 dist/
 .preview/
+release/
 
 # Local agent/editor state
 .claude/
