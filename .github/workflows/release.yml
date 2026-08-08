@@ -30,7 +30,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out the tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
@@ -106,7 +106,7 @@ jobs:
         run: ./scripts/package-release.sh "$RELEASE_VERSION" "${{ matrix.target }}"
 
       - name: Upload release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: quietpaper-${{ matrix.target }}
           path: release/*
@@ -129,13 +129,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out tag metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Download packaged applications
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: quietpaper-*
           path: release-assets
