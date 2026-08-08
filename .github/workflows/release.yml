@@ -1,0 +1,165 @@
+name: Release macOS apps
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish again (for example v1.0.26)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Apple Silicon
+            runner: macos-15
+            target: apple-silicon
+          - label: Intel
+            runner: macos-15-intel
+            target: intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Validate the release version
+        shell: zsh {0}
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="$REQUESTED_TAG"
+          else
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          fi
+          if ! [[ "$RELEASE_TAG" =~ '^v[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+            echo "error: release tag must use vX.Y.Z: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if ! git tag --points-at HEAD | grep -Fxq "$RELEASE_TAG"; then
+            echo "error: $RELEASE_TAG does not point at the checked-out commit" >&2
+            exit 1
+          fi
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          SOURCE_VERSION=$(sed -n 's/^    static let current = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' Sources/QuietPaper/Infrastructure/AppVersion.swift)
+          if [[ "$SOURCE_VERSION" != "$RELEASE_VERSION" ]]; then
+            echo "error: tag version $RELEASE_VERSION does not match AppVersion.current $SOURCE_VERSION" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Import Developer ID certificate when configured
+        shell: zsh {0}
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MACOS_CERTIFICATE_P12" ]]; then
+            echo "No Developer ID certificate configured; using ad-hoc signing."
+            exit 0
+          fi
+          if [[ -z "$MACOS_CERTIFICATE_PASSWORD" ]]; then
+            echo "error: MACOS_CERTIFICATE_PASSWORD is missing" >&2
+            exit 1
+          fi
+          CERTIFICATE_PATH="$RUNNER_TEMP/quietpaper-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/quietpaper-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          CODESIGN_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          if [[ -z "$CODESIGN_IDENTITY" ]]; then
+            echo "error: Developer ID Application identity was not found" >&2
+            exit 1
+          fi
+          echo "QUIETPAPER_CODESIGN_IDENTITY=$CODESIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "QUIETPAPER_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "QUIETPAPER_CERTIFICATE_PATH=$CERTIFICATE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build, verify, and package
+        shell: zsh {0}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ./scripts/package-release.sh "$RELEASE_VERSION" "${{ matrix.target }}"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: quietpaper-${{ matrix.target }}
+          path: release/*
+          if-no-files-found: error
+
+      - name: Remove the temporary signing keychain
+        if: always()
+        shell: zsh {0}
+        run: |
+          if [[ -n "${QUIETPAPER_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$QUIETPAPER_KEYCHAIN_PATH"
+          fi
+          if [[ -n "${QUIETPAPER_CERTIFICATE_PATH:-}" ]]; then
+            rm -f "$QUIETPAPER_CERTIFICATE_PATH"
+          fi
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tag metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download packaged applications
+        uses: actions/download-artifact@v5
+        with:
+          pattern: quietpaper-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="$REQUESTED_TAG"
+          else
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          fi
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          find release-assets -maxdepth 1 -type f -print | sort
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Quiet Paper $RELEASE_VERSION"
+          fi
