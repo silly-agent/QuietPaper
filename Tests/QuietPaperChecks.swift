@@ -30,13 +30,68 @@ struct QuietPaperChecks {
         try moduleMarkdownExportSupportsMergedAndSeparateFiles()
         try projectMarkdownExportPreservesHierarchy()
         noteRangeSelectionIsInclusiveAndCancelable()
+        writingFocusBlurOnlyAppliesAwayFromNavigationHover()
         parsesContinuousDocumentBlocks()
         parsesMarkdownTables()
         unclosedFencePreservesCode()
         plainTextRemovesMarkdownFurnitureButKeepsCode()
         normalizesConcatenatedAndRepeatedImages()
         formatsPlainAndFencedJSON()
-        print("Quiet Paper checks passed: 33/33")
+        print("Quiet Paper checks passed: 34/34")
+    }
+
+    static func writingFocusBlurOnlyAppliesAwayFromNavigationHover() {
+        var state = WritingFocusBlurState()
+        precondition(!state.shouldBlurNavigation, "没有编辑焦点时左侧导航必须保持清晰")
+
+        state.setEditorFocus(true, target: .title)
+        precondition(state.shouldBlurNavigation, "标题获得焦点时应雾化左侧导航")
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: true),
+            "标题正在输入时，标题栏和工具栏必须保持清晰"
+        )
+        precondition(
+            !state.shouldBlurNavigation(isEnabled: false),
+            "用户关闭写作聚焦雾化后，编辑焦点不能再触发左侧雾化"
+        )
+
+        state.setNavigationHover(true, region: .projectSidebar)
+        precondition(!state.shouldBlurNavigation, "鼠标进入项目栏时两栏都应恢复清晰")
+        state.setNavigationHover(false, region: .projectSidebar)
+        precondition(state.shouldBlurNavigation, "鼠标移出后若编辑焦点仍在，应重新雾化")
+
+        state.setEditorFocus(true, target: .body)
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: true),
+            "标题焦点尚未结束时不能提前雾化编辑器顶部"
+        )
+        state.setEditorFocus(false, target: .title)
+        precondition(state.shouldBlurNavigation, "标题与正文切换焦点时正文焦点应继续触发雾化")
+        precondition(
+            state.shouldBlurEditorHeader(isEnabled: true),
+            "正文独占焦点时应雾化标题栏和工具栏"
+        )
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: false),
+            "关闭设置后编辑器顶部不能雾化"
+        )
+
+        state.setEditorHeaderHover(true)
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: true),
+            "鼠标进入编辑器顶部时必须恢复清晰"
+        )
+        state.setEditorHeaderHover(false)
+        precondition(
+            state.shouldBlurEditorHeader(isEnabled: true),
+            "鼠标移出编辑器顶部后应重新雾化"
+        )
+
+        state.setNavigationHover(true, region: .noteList)
+        precondition(!state.shouldBlurNavigation, "鼠标进入文件栏时两栏都应恢复清晰")
+        state.setNavigationHover(false, region: .noteList)
+        state.setEditorFocus(false, target: .body)
+        precondition(!state.shouldBlurNavigation, "编辑焦点离开后必须解除雾化")
     }
 
     static func noteRangeSelectionIsInclusiveAndCancelable() {

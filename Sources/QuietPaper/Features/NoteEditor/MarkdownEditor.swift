@@ -53,6 +53,7 @@ struct MarkdownEditor: NSViewRepresentable {
     var documentID: UUID? = nil
     var controller: MarkdownEditorController? = nil
     var showsScrollIndicators = true
+    var onFocusChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -133,6 +134,10 @@ struct MarkdownEditor: NSViewRepresentable {
         }
     }
 
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        coordinator.parent.onFocusChange(false)
+    }
+
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownEditor
@@ -148,6 +153,14 @@ struct MarkdownEditor: NSViewRepresentable {
             let markdown = textView.markdownString
             synchronizer.editorDidChange(to: markdown)
             parent.text = markdown
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.onFocusChange(true)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.onFocusChange(false)
         }
     }
 }

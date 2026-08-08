@@ -11,6 +11,7 @@ swiftc \
   -Xcc "-fmodule-map-file=$PROJECT_DIR/Sources/CSQLite/module.modulemap" \
   "$PROJECT_DIR/Sources/QuietPaper/Domain/Models.swift" \
   "$PROJECT_DIR/Sources/QuietPaper/Domain/Protocols.swift" \
+  "$PROJECT_DIR/Sources/QuietPaper/Features/Shared/WritingFocusBlur.swift" \
   "$PROJECT_DIR/Sources/QuietPaper/Features/NoteList/NoteRangeSelection.swift" \
   "$PROJECT_DIR/Sources/QuietPaper/Infrastructure/Markdown/MarkdownPlainText.swift" \
   "$PROJECT_DIR/Sources/QuietPaper/Infrastructure/Markdown/MarkdownImageSyntax.swift" \
@@ -27,6 +28,7 @@ swiftc \
   "$PROJECT_DIR/Sources/QuietPaper/Data/WorkspaceDatabase.swift" \
   "$PROJECT_DIR/Tests/QuietPaperChecks.swift" \
   -lsqlite3 \
+  -framework SwiftUI \
   -framework NaturalLanguage \
   -o "$OUTPUT_PATH"
 "$OUTPUT_PATH"

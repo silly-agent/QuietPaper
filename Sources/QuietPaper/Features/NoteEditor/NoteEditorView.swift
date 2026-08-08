@@ -5,14 +5,26 @@ import UniformTypeIdentifiers
 struct NoteEditorView: View {
     @EnvironmentObject private var model: AppModel
     let isFocusMode: Bool
+    let isHeaderBlurred: Bool
+    let onHeaderHoverChange: (Bool) -> Void
+    let onFocusChange: (WritingEditorFocusTarget, Bool) -> Void
     @State private var editing = true
     @State private var isShowingTablePopover = false
     @State private var tableColumns = 3
     @State private var tableDataRows = 3
     @StateObject private var editorController = MarkdownEditorController()
+    @FocusState private var isTitleFocused: Bool
 
-    init(isFocusMode: Bool = false) {
+    init(
+        isFocusMode: Bool = false,
+        isHeaderBlurred: Bool = false,
+        onHeaderHoverChange: @escaping (Bool) -> Void = { _ in },
+        onFocusChange: @escaping (WritingEditorFocusTarget, Bool) -> Void = { _, _ in }
+    ) {
         self.isFocusMode = isFocusMode
+        self.isHeaderBlurred = isHeaderBlurred
+        self.onHeaderHoverChange = onHeaderHoverChange
+        self.onFocusChange = onFocusChange
     }
 
     var body: some View {
@@ -24,6 +36,11 @@ struct NoteEditorView: View {
             }
         }
         .background(Theme.background)
+        .onDisappear {
+            onHeaderHoverChange(false)
+            onFocusChange(.title, false)
+            onFocusChange(.body, false)
+        }
     }
 
     private var editorSurface: some View {
@@ -39,7 +56,10 @@ struct NoteEditorView: View {
                     resolveImage: { path in NSImage(contentsOf: model.attachments.url(for: path)) },
                     documentID: model.selectedNoteID,
                     controller: editorController,
-                    showsScrollIndicators: !isFocusMode
+                    showsScrollIndicators: !isFocusMode,
+                    onFocusChange: { focused in
+                        onFocusChange(.body, focused)
+                    }
                 )
             } else {
                 MarkdownPreview(
@@ -108,6 +128,10 @@ struct NoteEditorView: View {
             TextField("笔记标题", text: Binding(get: { model.draftTitle }, set: { value in model.setDraftTitle(value) }))
                 .textFieldStyle(.plain)
                 .font(AppTypography.largeTitle)
+                .focused($isTitleFocused)
+                .onChange(of: isTitleFocused) { focused in
+                    onFocusChange(.title, focused)
+                }
 
             if editing {
                 HStack(spacing: 0) {
@@ -119,6 +143,12 @@ struct NoteEditorView: View {
         .padding(.horizontal, 24)
         .padding(.top, 14)
         .padding(.bottom, 12)
+        .contentShape(Rectangle())
+        .onHover(perform: onHeaderHoverChange)
+        .onDisappear {
+            onHeaderHoverChange(false)
+        }
+        .writingFocusBlur(isActive: isHeaderBlurred)
     }
 
     private var statusBar: some View {
