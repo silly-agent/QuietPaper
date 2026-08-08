@@ -14,7 +14,7 @@ Quiet Paper 适合按“项目 / 模块 / 文件”整理长期资料。它不�
 - 按项目、模块和文件组织内容，支持排序、快速跳转和专注模式。
 - 搜索标题、正文和路径；普通笔记可使用系统 NLP 能力建立本地向量索引。
 - 保存并运行 HTTP 请求，编辑 Query、Headers 和 JSON / 文本 Body。
-- 管理 MySQL、PostgreSQL、Redis 和 SQLite 连接，在应用内查看结构化结果。
+- 管理 MySQL、PostgreSQL、Redis 和 SQLite 连接，用自然语言生成 SQL，并在应用内查看结构化结果。
 - 把单篇笔记导出为 Markdown，或按项目 / 模块合并导出、打包为 ZIP。
 - 备份完整数据库和附件，也可以在设置中迁移存储目录。
 
@@ -31,6 +31,28 @@ Quiet Paper 适合按“项目 / 模块 / 文件”整理长期资料。它不�
 请求文件和普通笔记放在同一套项目目录中。只有点击“发送”后，应用才会访问填写的 HTTP 或 HTTPS 地址；响应默认只保留在当前会话。
 
 ![HTTP 请求工作台](docs/images/quiet-paper-http-request.png)
+
+### AI 数据库助手
+
+数据库连接和笔记一样保存在项目目录中。连接成功后，可以直接描述想查什么；Quiet Paper 会展示生成的 SQL、执行耗时和表格结果。写入或修改类命令会在真正执行前再次确认。
+
+![AI 数据库助手](docs/images/quiet-paper-ai-database.jpg)
+
+仓库里附了一套不含真实业务数据的 PostgreSQL 演示环境。Docker 启动后会创建虚构的客户和订单数据：
+
+```bash
+docker compose -f docker-compose.demo.yml up -d
+```
+
+在应用中新建 PostgreSQL 连接，填写 `127.0.0.1:55432`，用户名和数据库名均为 `quietpaper_demo`，演示密码是 `quietpaper_demo_only`。随后可以直接问：
+
+> 统计每个客户的订单数和有效消费金额，排除退款，按消费额从高到低取前 5 名。
+
+这套账号只服务于绑定在本机回环地址的演示容器，不要把同样的密码用在其他环境。停止演示环境可运行：
+
+```bash
+docker compose -f docker-compose.demo.yml down
+```
 
 ## 运行
 
@@ -77,7 +99,7 @@ open dist/QuietPaper-Intel.app
 - 笔记数据库、WAL 文件、附件、备份、构建目录和本地配置都已加入 `.gitignore`。
 - 搜索、Markdown 处理、导出和向量化在本机完成。
 - HTTP 请求和数据库连接只在用户主动操作时访问目标地址。
-- DeepSeek 是可选功能。配置 API Key 后，提问内容及相关笔记片段会发送给所选模型；不配置时使用本地问答实现。
+- DeepSeek 是可选功能。配置 API Key 后，笔记问答会发送提问及相关笔记片段；数据库助手只发送问题和经过裁剪的表结构，不发送连接密码或完整连接串。
 - 请求文件和数据库连接可能包含凭证。公开导出文件或提交代码前，请自行检查其中的敏感信息。
 
 ## 目录
