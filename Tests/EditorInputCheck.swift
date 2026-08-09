@@ -11,6 +11,8 @@ struct EditorInputCheck {
         var content = ""
         let imageMarkdown = "![图片](attachments/test.png)"
         var receivedImages = 0
+        var findRequests = 0
+        let editorController = MarkdownEditorController()
         let editor = MarkdownEditor(
             text: Binding(
                 get: { content },
@@ -20,7 +22,9 @@ struct EditorInputCheck {
                 receivedImages += 1
                 return imageMarkdown
             },
-            resolveImage: { _ in nil }
+            resolveImage: { _ in nil },
+            controller: editorController,
+            onFind: { findRequests += 1 }
         )
         let host = NSHostingView(rootView: editor.frame(width: 640, height: 420))
         host.frame = NSRect(x: 0, y: 0, width: 640, height: 420)
@@ -43,6 +47,31 @@ struct EditorInputCheck {
         precondition(textView.isSelectable, "内容区必须可选择")
         precondition(textView.frame.width > 0 && textView.frame.height > 0, "内容区尺寸必须有效")
         precondition(window.makeFirstResponder(textView), "内容区必须能获得输入焦点")
+
+        let findEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "f",
+            charactersIgnoringModifiers: "f",
+            isARepeat: false,
+            keyCode: 3
+        )!
+        precondition(textView.performKeyEquivalent(with: findEvent), "Command-F 必须由编辑器处理")
+        precondition(findRequests == 1, "Command-F 必须请求打开查找栏")
+
+        textView.setMarkdown("关键字 one 关键字", resolveImage: { _ in nil })
+        let findRanges = editorController.findRanges(for: "关键字")
+        precondition(findRanges.count == 2, "编辑模式必须找到所有正文匹配")
+        precondition(editorController.revealFindMatch(findRanges[1]), "编辑模式必须能够定位下一处匹配")
+        precondition(textView.selectedRange() == findRanges[1], "定位后必须选中当前匹配")
+        precondition(editorController.revealFindMatch(findRanges[0]), "循环后必须能够回到第一处匹配")
+        precondition(textView.selectedRange() == findRanges[0], "循环后必须选中第一处匹配")
+        textView.setMarkdown("", resolveImage: { _ in nil })
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
 
         textView.insertText("可以输入中文", replacementRange: textView.selectedRange())
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -217,8 +246,9 @@ struct EditorInputCheck {
         precondition((paragraphStyle?.lineSpacing ?? 0) >= 5, "编辑器正文必须增加行高")
 
         verifyTextSynchronization()
+        verifyViewportRestoration()
 
-        print("Quiet Paper editor input checks passed: 44/44")
+        print("Quiet Paper editor input checks passed: 49/49")
     }
 
     private static func verifyTextSynchronization() {
@@ -275,6 +305,77 @@ struct EditorInputCheck {
                 hasMarkedText: false
             ),
             "稳定状态下必须接受工具栏产生的正文变化"
+        )
+    }
+
+    private static func verifyViewportRestoration() {
+        let documentID = UUID()
+        let controller = MarkdownEditorController()
+        var content = (1...180).map {
+            "第 \($0) 行：用于验证专注模式切换后仍停留在原来的阅读和编辑位置。"
+        }.joined(separator: "\n")
+
+        let firstEditor = MarkdownEditor(
+            text: Binding(get: { content }, set: { content = $0 }),
+            onPasteImage: { _ in nil },
+            resolveImage: { _ in nil },
+            documentID: documentID,
+            controller: controller
+        )
+        let firstHost = NSHostingView(rootView: firstEditor.frame(width: 640, height: 260))
+        firstHost.frame = NSRect(x: 0, y: 0, width: 640, height: 260)
+        let firstWindow = NSWindow(
+            contentRect: firstHost.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        firstWindow.contentView = firstHost
+        firstWindow.makeKey()
+        firstHost.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+
+        guard let firstTextView: PastingTextView = findSubview(in: firstHost) else {
+            fatalError("未找到用于视口保存检查的文本视图")
+        }
+        let targetRange = (firstTextView.string as NSString).range(of: "第 120 行")
+        precondition(targetRange.location != NSNotFound, "视口保存检查必须找到目标行")
+        let expectedSelection = NSRange(location: targetRange.location + targetRange.length, length: 0)
+        firstTextView.setSelectedRange(expectedSelection)
+        firstTextView.scrollRangeToVisible(targetRange)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        let expectedTopCharacter = firstTextView.viewportSnapshot(documentID: documentID).topVisibleCharacterIndex
+        controller.captureViewport()
+
+        let secondEditor = MarkdownEditor(
+            text: Binding(get: { content }, set: { content = $0 }),
+            onPasteImage: { _ in nil },
+            resolveImage: { _ in nil },
+            documentID: documentID,
+            controller: controller,
+            showsScrollIndicators: false
+        )
+        let secondHost = NSHostingView(rootView: secondEditor.frame(width: 480, height: 260))
+        secondHost.frame = NSRect(x: 0, y: 0, width: 480, height: 260)
+        let secondWindow = NSWindow(
+            contentRect: secondHost.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        secondWindow.contentView = secondHost
+        secondWindow.makeKey()
+        secondHost.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+
+        guard let secondTextView: PastingTextView = findSubview(in: secondHost) else {
+            fatalError("未找到用于视口恢复检查的文本视图")
+        }
+        let restoredTopCharacter = secondTextView.viewportSnapshot(documentID: documentID).topVisibleCharacterIndex
+        precondition(secondTextView.selectedRange() == expectedSelection, "布局切换后必须恢复正文光标位置")
+        precondition(
+            restoredTopCharacter == expectedTopCharacter,
+            "布局切换并重新换行后必须恢复可视区域顶部的正文锚点"
         )
     }
 

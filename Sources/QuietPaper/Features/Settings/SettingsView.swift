@@ -149,7 +149,7 @@ struct SettingsView: View {
 
     private func summary(for tab: SettingsTab) -> String {
         switch tab {
-        case .appearance: "选择一套克制的界面主题；主题色只用于强调和状态，阅读表面保持清爽。"
+        case .appearance: "选择界面主题，并设置写作时是否雾化左侧导航。"
         case .shortcuts: "为常用文件配置最多三个全局快捷键，从任意页面快速跳转。"
         case .ai: "配置在线模型，并管理完全在本机生成和检索的笔记索引。"
         case .storage: "查看或更改笔记、附件与搜索索引的本地存储目录。"

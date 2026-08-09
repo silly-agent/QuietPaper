@@ -5,6 +5,10 @@ struct RootView: View {
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
     @State private var showAI = false
     @State private var expandedProjects: Set<UUID> = []
+    @StateObject private var markdownEditorController = MarkdownEditorController()
+    @State private var writingFocus = WritingFocusBlurState()
+    @AppStorage(WritingFocusBlurPreference.defaultsKey)
+    private var isWritingFocusBlurEnabled = WritingFocusBlurPreference.defaultValue
 
     var body: some View {
         workspace
@@ -58,6 +62,14 @@ struct RootView: View {
             } content: {
                 NoteListView()
                     .navigationSplitViewColumnWidth(min: 260, ideal: 310, max: 390)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        setNavigationHover(hovering, region: .noteList)
+                    }
+                    .onDisappear {
+                        setNavigationHover(false, region: .noteList)
+                    }
+                    .writingFocusBlur(isActive: shouldBlurNavigation)
             } detail: {
                 noteEditor
             }
@@ -73,23 +85,67 @@ struct RootView: View {
     private var projectSidebar: some View {
         ProjectSidebar(expanded: $expandedProjects)
             .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 310)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                setNavigationHover(hovering, region: .projectSidebar)
+            }
+            .onDisappear {
+                setNavigationHover(false, region: .projectSidebar)
+            }
+            .writingFocusBlur(isActive: shouldBlurNavigation)
     }
 
     private var noteEditor: some View {
         Group {
             if model.selectedNote?.kind == .request {
                 HTTPRequestEditorView()
+            } else if model.selectedNote?.kind == .websocket {
+                WebSocketRequestEditorView()
             } else if model.selectedNote?.kind == .connection {
                 DatabaseConnectionEditorView()
             } else {
-                NoteEditorView(isFocusMode: model.isFocusMode)
+                NoteEditorView(
+                    isFocusMode: model.isFocusMode,
+                    editorController: markdownEditorController,
+                    isHeaderBlurred: shouldBlurEditorHeader,
+                    onHeaderHoverChange: setEditorHeaderHover,
+                    onFocusChange: setEditorFocus
+                )
+                .preferredColorScheme(model.isFocusMode ? .light : nil)
             }
         }
+    }
+
+    private func setEditorFocus(_ target: WritingEditorFocusTarget, _ focused: Bool) {
+        var updated = writingFocus
+        updated.setEditorFocus(focused, target: target)
+        writingFocus = updated
+    }
+
+    private var shouldBlurNavigation: Bool {
+        writingFocus.shouldBlurNavigation(isEnabled: isWritingFocusBlurEnabled)
+    }
+
+    private var shouldBlurEditorHeader: Bool {
+        writingFocus.shouldBlurEditorHeader(isEnabled: isWritingFocusBlurEnabled)
+    }
+
+    private func setEditorHeaderHover(_ hovering: Bool) {
+        var updated = writingFocus
+        updated.setEditorHeaderHover(hovering)
+        writingFocus = updated
+    }
+
+    private func setNavigationHover(_ hovering: Bool, region: WritingNavigationRegion) {
+        var updated = writingFocus
+        updated.setNavigationHover(hovering, region: region)
+        writingFocus = updated
     }
 
     private func toggleSidebar() {
         withAnimation {
             if model.isFocusMode {
+                markdownEditorController.captureViewport()
                 model.isFocusMode = false
                 sidebarVisibility = .all
                 return
@@ -104,6 +160,7 @@ struct RootView: View {
     }
 
     private func toggleFocusMode() {
+        markdownEditorController.captureViewport()
         withAnimation {
             model.isFocusMode.toggle()
             if !model.isFocusMode {

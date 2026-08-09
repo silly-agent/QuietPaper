@@ -130,6 +130,27 @@ final class AppModel: ObservableObject {
     var selectedModule: NoteModule? { modules.first { $0.id == selectedModuleID } }
     var selectedNote: Note? { notes.first { $0.id == selectedNoteID } }
     var showsNoteList: Bool { selectedModule?.isProjectRoot == false }
+    var isSelectedNoteAIUnreadable: Bool {
+        guard let module = selectedModule else { return false }
+        return isAIUnreadable(module)
+    }
+
+    func isAIUnreadable(_ project: Project) -> Bool {
+        project.isAIUnreadable
+    }
+
+    func isAIUnreadable(_ module: NoteModule) -> Bool {
+        module.isAIUnreadable || projects.first(where: { $0.id == module.projectID })?.isAIUnreadable == true
+    }
+
+    func setAIUnreadable(kind: DeletedItemKind, id: UUID, value: Bool) {
+        guard kind != .note else { return }
+        do {
+            forceSave()
+            try database.setAIUnreadable(kind: kind, id: id, value: value)
+            reloadWorkspace(selectFirst: false)
+        } catch { report(error) }
+    }
 
     func modules(in projectID: UUID) -> [NoteModule] {
         modules.filter { $0.projectID == projectID }
@@ -146,37 +167,42 @@ final class AppModel: ObservableObject {
     func selectProject(_ id: UUID) {
         let firstModule = modules(in: id).first
         if selectedProjectID == id, selectedModuleID == firstModule?.id { return }
-        forceSave()
+        let pendingSave = prepareNavigationSave()
         selectedProjectID = id
         selectedModuleID = firstModule?.id
-        reloadNotes(selectFirst: true)
+        reloadNotesFromCache(selectFirst: true)
+        finishNavigation(pendingSave)
     }
 
     func selectModule(_ id: UUID) {
         guard id != selectedModuleID else { return }
-        forceSave()
+        let pendingSave = prepareNavigationSave()
         selectedModuleID = id
         selectedProjectID = modules.first(where: { $0.id == id })?.projectID
-        reloadNotes(selectFirst: true)
+        reloadNotesFromCache(selectFirst: true)
+        finishNavigation(pendingSave)
     }
 
     func selectNote(_ id: UUID) {
         guard id != selectedNoteID else { return }
-        forceSave()
+        let pendingSave = prepareNavigationSave()
         selectedNoteID = id
         loadDraft()
+        enqueueNavigationSave(pendingSave)
     }
 
     func selectProjectFile(_ noteID: UUID, projectID: UUID) {
         guard let root = modules.first(where: { $0.projectID == projectID && $0.isProjectRoot }) else { return }
         if selectedProjectID == projectID, selectedModuleID == root.id, selectedNoteID == noteID { return }
-        forceSave()
+        let pendingSave = prepareNavigationSave()
         selectedProjectID = projectID
         selectedModuleID = root.id
-        reloadNotes(selectFirst: false)
-        guard notes.contains(where: { $0.id == noteID }) else { return }
-        selectedNoteID = noteID
-        loadDraft()
+        reloadNotesFromCache(selectFirst: false)
+        if notes.contains(where: { $0.id == noteID }) {
+            selectedNoteID = noteID
+            loadDraft()
+        }
+        finishNavigation(pendingSave)
     }
 
     func jumpToQuickPage(_ slot: Int) {
@@ -236,8 +262,13 @@ final class AppModel: ObservableObject {
     func forceSave() {
         autosaveTask?.cancel()
         autosaveTask = nil
-        guard selectedNoteID != nil, saveState == .pending || saveState == .saving || draftDiffersFromStored else { return }
-        saveDraft()
+        if selectedNoteID != nil, saveState == .pending || saveState == .saving || draftDiffersFromStored {
+            saveDraft()
+        } else {
+            // A navigation save may already be queued for the previously selected
+            // note. Explicit saves and app termination must wait for it as well.
+            saveQueue.sync {}
+        }
     }
 
     func retrySave() { saveDraft() }
@@ -282,12 +313,16 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func createRequest(named title: String = "新请求") -> Note? {
-        guard let selectedModuleID else { return nil }
+    func createRequest(
+        named title: String = "新请求",
+        draft: HTTPRequestDraft = HTTPRequestDraft(),
+        moduleID: UUID? = nil
+    ) -> Note? {
+        guard let moduleID = moduleID ?? selectedModuleID else { return nil }
         do {
             forceSave()
-            let content = try HTTPRequestDraft().encoded()
-            let item = try database.createNote(moduleID: selectedModuleID, title: title, content: content, kind: .request)
+            let content = try draft.encoded()
+            let item = try database.createNote(moduleID: moduleID, title: title, content: content, kind: .request)
             reloadNotes(selectFirst: false)
             selectNote(item.id)
             return item
@@ -296,12 +331,33 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func createConnection(named title: String = "新连接") -> Note? {
-        guard let selectedModuleID else { return nil }
+    func createWebSocketRequest(
+        named title: String = "新 WebSocket 请求",
+        moduleID: UUID? = nil
+    ) -> Note? {
+        guard let moduleID = moduleID ?? selectedModuleID else { return nil }
         do {
             forceSave()
+            let content = try WebSocketRequestDraft().encoded()
+            let item = try database.createNote(moduleID: moduleID, title: title, content: content, kind: .websocket)
+            reloadNotes(selectFirst: false)
+            selectNote(item.id)
+            return item
+        } catch { report(error) }
+        return nil
+    }
+
+    @discardableResult
+    func createConnection(named title: String = "新连接", moduleID: UUID? = nil) -> Note? {
+        guard let moduleID = moduleID ?? selectedModuleID else { return nil }
+        do {
+            guard !(try database.isAIUnreadable(moduleID: moduleID)) else {
+                startupError = AIReadProtection.featureUnavailableMessage
+                return nil
+            }
+            forceSave()
             let content = try DatabaseConnectionFile().encoded()
-            let item = try database.createNote(moduleID: selectedModuleID, title: title, content: content, kind: .connection)
+            let item = try database.createNote(moduleID: moduleID, title: title, content: content, kind: .connection)
             reloadNotes(selectFirst: false)
             selectNote(item.id)
             return item
@@ -324,13 +380,35 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func createProjectRequest(projectID: UUID? = nil, named title: String = "新请求") -> Note? {
+    func createProjectRequest(
+        projectID: UUID? = nil,
+        named title: String = "新请求",
+        draft: HTTPRequestDraft = HTTPRequestDraft()
+    ) -> Note? {
         guard let projectID = projectID ?? selectedProjectID else { return nil }
         do {
             forceSave()
             let root = try database.projectRootModule(projectID: projectID)
-            let content = try HTTPRequestDraft().encoded()
+            let content = try draft.encoded()
             let item = try database.createNote(moduleID: root.id, title: title, content: content, kind: .request)
+            reloadWorkspace(selectFirst: false)
+            selectProjectFile(item.id, projectID: projectID)
+            return item
+        } catch { report(error) }
+        return nil
+    }
+
+    @discardableResult
+    func createProjectWebSocketRequest(
+        projectID: UUID? = nil,
+        named title: String = "新 WebSocket 请求"
+    ) -> Note? {
+        guard let projectID = projectID ?? selectedProjectID else { return nil }
+        do {
+            forceSave()
+            let root = try database.projectRootModule(projectID: projectID)
+            let content = try WebSocketRequestDraft().encoded()
+            let item = try database.createNote(moduleID: root.id, title: title, content: content, kind: .websocket)
             reloadWorkspace(selectFirst: false)
             selectProjectFile(item.id, projectID: projectID)
             return item
@@ -342,6 +420,10 @@ final class AppModel: ObservableObject {
     func createProjectConnection(projectID: UUID? = nil, named title: String = "新连接") -> Note? {
         guard let projectID = projectID ?? selectedProjectID else { return nil }
         do {
+            guard !(try database.isAIUnreadable(projectID: projectID)) else {
+                startupError = AIReadProtection.featureUnavailableMessage
+                return nil
+            }
             forceSave()
             let root = try database.projectRootModule(projectID: projectID)
             let content = try DatabaseConnectionFile().encoded()
@@ -405,11 +487,30 @@ final class AppModel: ObservableObject {
     }
 
     func delete(kind: DeletedItemKind, id: UUID) {
+        if kind == .note {
+            _ = deleteNotes([id])
+            return
+        }
+
         do {
             forceSave()
             try database.softDelete(kind: kind, id: id)
             reloadWorkspace(selectFirst: true)
         } catch { report(error) }
+    }
+
+    @discardableResult
+    func deleteNotes(_ ids: [UUID]) -> Bool {
+        guard !ids.isEmpty else { return true }
+        do {
+            forceSave()
+            try database.softDeleteNotes(ids: ids)
+            reloadWorkspace(selectFirst: true)
+            return true
+        } catch {
+            report(error)
+            return false
+        }
     }
 
     func deletedItems() -> [DeletedItem] {
@@ -457,7 +558,7 @@ final class AppModel: ObservableObject {
             // 1. FTS5 关键词检索（权重 0.4）
             let terms = RetrievalQueryTerms.make(from: question)
             for term in terms {
-                for result in try database.search(query: term, scope: searchScope, projectID: selectedProjectID, moduleID: selectedModuleID) {
+                for result in try database.searchForAI(query: term, scope: searchScope, projectID: selectedProjectID, moduleID: selectedModuleID) {
                     let previous = combined[result.noteID]?.score ?? 0
                     combined[result.noteID] = (previous + 1, result)
                 }
@@ -698,24 +799,59 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Navigation must update immediately even when Markdown indexing makes the
+    /// outgoing note expensive to persist. Capture the old draft before changing
+    /// selection, mirror it into the in-memory lists, then serialize the actual
+    /// write on the existing save queue.
+    private func prepareNavigationSave() -> (note: Note, sequence: UInt64)? {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        guard selectedNoteID != nil,
+              saveState == .pending || saveState == .saving || draftDiffersFromStored,
+              let snapshot = draftSnapshot() else { return nil }
+        updateCachedNote(snapshot.note)
+        return snapshot
+    }
+
+    private func enqueueNavigationSave(_ snapshot: (note: Note, sequence: UInt64)?) {
+        guard let snapshot else { return }
+        let database = database
+        saveQueue.async { [weak self] in
+            let outcome: SaveOutcome
+            do {
+                try database.save(note: snapshot.note)
+                outcome = .success((try database.note(id: snapshot.note.id)) ?? snapshot.note)
+            } catch {
+                outcome = .failure(error.localizedDescription)
+            }
+            Task { @MainActor [weak self] in
+                self?.apply(outcome, snapshot: snapshot)
+            }
+        }
+    }
+
+    private func updateCachedNote(_ item: Note) {
+        if let index = notes.firstIndex(where: { $0.id == item.id }) {
+            notes[index] = item
+        }
+        if let index = allNotes.firstIndex(where: { $0.id == item.id }) {
+            allNotes[index] = item
+        }
+        if let module = modules.first(where: { $0.id == item.moduleID }), module.isProjectRoot,
+           var projectFiles = projectFilesByProjectID[module.projectID],
+           let index = projectFiles.firstIndex(where: { $0.id == item.id }) {
+            projectFiles[index] = item
+            projectFilesByProjectID[module.projectID] = projectFiles
+        }
+    }
+
     private func apply(_ outcome: SaveOutcome, snapshot: (note: Note, sequence: UInt64)) {
         guard snapshot.sequence >= latestAppliedSaveSequence else { return }
         latestAppliedSaveSequence = snapshot.sequence
 
         switch outcome {
         case .success(let saved):
-            if let index = notes.firstIndex(where: { $0.id == saved.id }) {
-                notes[index] = saved
-            }
-            if let index = allNotes.firstIndex(where: { $0.id == saved.id }) {
-                allNotes[index] = saved
-            }
-            if let module = modules.first(where: { $0.id == saved.moduleID }), module.isProjectRoot,
-               var projectFiles = projectFilesByProjectID[module.projectID],
-               let index = projectFiles.firstIndex(where: { $0.id == saved.id }) {
-                projectFiles[index] = saved
-                projectFilesByProjectID[module.projectID] = projectFiles
-            }
+            updateCachedNote(saved)
             if !searchQuery.isEmpty { updateSearch() }
             guard selectedNoteID == saved.id else { return }
             if draftTitle.trimmingCharacters(in: .newlines) == snapshot.note.title,
@@ -761,6 +897,43 @@ final class AppModel: ObservableObject {
             loadDraft()
             updateSearch()
         } catch { report(error) }
+    }
+
+    private func reloadNotesFromCache(selectFirst: Bool) {
+        notes = selectedModuleID.map { moduleID in
+            allNotes.filter { $0.moduleID == moduleID }
+        } ?? []
+        noteFoldGroups = []
+        if selectFirst || selectedNoteID == nil || !notes.contains(where: { $0.id == selectedNoteID }) {
+            selectedNoteID = notes.first?.id
+        }
+        loadDraft()
+    }
+
+    private func finishNavigation(_ pendingSave: (note: Note, sequence: UInt64)?) {
+        enqueueNavigationSave(pendingSave)
+        refreshNavigationDataInBackground()
+    }
+
+    private func refreshNavigationDataInBackground() {
+        guard let moduleID = selectedModuleID else { return }
+        let database = database
+        let query = searchQuery
+        let scope = searchScope
+        let projectID = selectedProjectID
+        saveQueue.async { [weak self] in
+            let foldGroups = (try? database.fetchNoteFoldGroups(moduleID: moduleID)) ?? []
+            let results = query.isEmpty
+                ? nil
+                : try? database.search(query: query, scope: scope, projectID: projectID, moduleID: moduleID)
+            Task { @MainActor [weak self] in
+                guard let self, self.selectedModuleID == moduleID else { return }
+                self.noteFoldGroups = foldGroups
+                if self.searchQuery == query, self.searchScope == scope, let results {
+                    self.searchResults = results
+                }
+            }
+        }
     }
 
     private func loadDraft() {

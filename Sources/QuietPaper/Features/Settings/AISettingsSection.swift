@@ -59,7 +59,7 @@ struct AISettingsSection: View {
             .background(Theme.control, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
 
-            Text("仅使用系统内置 NLP 模型将普通笔记内容向量化；API 请求和数据库连接不进入向量索引。向量化和检索过程完全离线，不发送数据到网络。")
+            Text("仅使用系统内置 NLP 模型将普通笔记内容向量化；API 请求、数据库连接及标记为 AI 不可读的项目或模块不进入向量索引。向量化和检索过程完全离线，不发送数据到网络。")
                 .font(AppTypography.tertiary)
                 .foregroundStyle(.tertiary)
                 .lineSpacing(2)

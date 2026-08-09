@@ -52,13 +52,23 @@ private enum NoteListItem: Identifiable {
     }
 }
 
+private struct NoteDeletionRequest: Identifiable {
+    let id = UUID()
+    let notes: [Note]
+
+    var count: Int { notes.count }
+    var alertTitle: String { count == 1 ? "删除笔记？" : "删除 \(count) 个文件？" }
+    var actionTitle: String { count == 1 ? "删除" : "删除 \(count) 个文件" }
+}
+
 struct NoteListView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("QuietPaper.noteListSortMode") private var sortModeRawValue = NoteListSortMode.fileName.rawValue
     @AppStorage("QuietPaper.noteListSortDirection") private var sortDirectionRawValue = NoteListSortDirection.ascending.rawValue
-    @State private var noteToDelete: Note?
+    @State private var deletionRequest: NoteDeletionRequest?
     @State private var noteToRename: Note?
     @State private var rangeSelection = NoteRangeSelection()
+    @State private var showRequestCreation = false
 
     private var sortMode: NoteListSortMode {
         NoteListSortMode(rawValue: sortModeRawValue) ?? .fileName
@@ -100,10 +110,10 @@ struct NoteListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.selectedModule?.isProjectRoot == true ? model.selectedProject?.name ?? "文件" : model.selectedModule?.name ?? "笔记")
-                        .font(AppTypography.sectionTitle)
+                        .font(.system(size: 13.5, weight: .semibold))
                     if !model.searchQuery.isEmpty {
                         Text("\(model.searchResults.count) 个搜索结果")
                             .font(AppTypography.tertiary)
@@ -116,11 +126,11 @@ struct NoteListView: View {
                 }
                 Menu {
                     Button("新建笔记") { _ = model.createNote() }
-                    Button("新建请求") { _ = model.createRequest() }
+                    Button("新建请求") { showRequestCreation = true }
                     Button("新建连接") { _ = model.createConnection() }
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                 }
                 .menuStyle(.borderlessButton)
                 .controlSize(.small)
@@ -128,8 +138,8 @@ struct NoteListView: View {
                 .disabled(model.selectedModuleID == nil)
                 .pointingHandCursor()
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
             if !model.searchQuery.isEmpty {
                 Picker("范围", selection: $model.searchScope) {
@@ -157,14 +167,24 @@ struct NoteListView: View {
             RenameNoteSheet(note: note)
                 .environmentObject(model)
         }
-        .alert("删除笔记？", isPresented: Binding(
-            get: { noteToDelete != nil },
-            set: { if !$0 { noteToDelete = nil } }
-        ), presenting: noteToDelete) { note in
+        .sheet(isPresented: $showRequestCreation) {
+            RequestCreationSheet(
+                onCreateHTTP: { draft in _ = model.createRequest(draft: draft) },
+                onCreateWebSocket: { _ = model.createWebSocketRequest() }
+            )
+        }
+        .alert(deletionRequest?.alertTitle ?? "删除笔记？", isPresented: Binding(
+            get: { deletionRequest != nil },
+            set: { if !$0 { deletionRequest = nil } }
+        ), presenting: deletionRequest) { request in
             Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) { model.delete(kind: .note, id: note.id) }
-        } message: { note in
-            Text("“\(note.title)”将移到最近删除。")
+            Button(request.actionTitle, role: .destructive) { confirmDeletion(request) }
+        } message: { request in
+            if let note = request.notes.first, request.count == 1 {
+                Text("“\(note.title)”将移到最近删除。")
+            } else {
+                Text("选中的 \(request.count) 个文件将移到最近删除，可在设置中恢复。")
+            }
         }
         .onChange(of: model.selectedModuleID) { _ in resetRangeSelection() }
         .onChange(of: model.searchQuery) { _ in resetRangeSelection() }
@@ -190,7 +210,7 @@ struct NoteListView: View {
                                 .contentShape(Rectangle())
                                 .onTapGesture { select(note) }
                                 .pointingHandCursor()
-                                .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                                .listRowInsets(EdgeInsets(top: 1.5, leading: 6, bottom: 1.5, trailing: 6))
                                 .listRowBackground(Color.clear)
                                 .listRowSeparator(.hidden)
                                 .contextMenu {
@@ -209,7 +229,11 @@ struct NoteListView: View {
                                                 .disabled(module.id == note.moduleID)
                                         }
                                     }
-                                    Button("删除", role: .destructive) { noteToDelete = note }
+                                    Button(role: .destructive) {
+                                        requestDeletion(for: note)
+                                    } label: {
+                                        Label(deletionMenuTitle(for: note), systemImage: "trash")
+                                    }
                                 }
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                         case .foldGroup(let group):
@@ -220,7 +244,7 @@ struct NoteListView: View {
                                 .contentShape(Rectangle())
                                 .onTapGesture { expand(group) }
                                 .pointingHandCursor()
-                                .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                                .listRowInsets(EdgeInsets(top: 1.5, leading: 6, bottom: 1.5, trailing: 6))
                                 .listRowBackground(Color.clear)
                                 .listRowSeparator(.hidden)
                                 .contextMenu {
@@ -236,6 +260,7 @@ struct NoteListView: View {
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
+                .environment(\.defaultMinListRowHeight, 24)
                 .animation(.easeInOut(duration: 0.24), value: model.noteFoldGroups)
                 .onExitCommand { resetRangeSelection() }
             }
@@ -308,19 +333,11 @@ struct NoteListView: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 11, weight: .medium))
-                Text(sortMode.title)
-                    .font(AppTypography.tertiary)
-                Image(systemName: sortDirection.symbolName)
-                    .font(.system(size: 9, weight: .semibold))
-            }
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 5)
-            .background(Theme.background, in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .controlSize(.small)
@@ -381,6 +398,29 @@ struct NoteListView: View {
         }
     }
 
+    private func deletionMenuTitle(for note: Note) -> String {
+        let count = rangeSelection.resolvedActionIDs(
+            for: note.id,
+            orderedIDs: sortedNotes.map(\.id)
+        ).count
+        return count == 1 ? "删除" : "删除 \(count) 个文件"
+    }
+
+    private func requestDeletion(for note: Note) {
+        let noteByID = Dictionary(uniqueKeysWithValues: sortedNotes.map { ($0.id, $0) })
+        let notes = rangeSelection.resolvedActionIDs(
+            for: note.id,
+            orderedIDs: sortedNotes.map(\.id)
+        ).compactMap { noteByID[$0] }
+        deletionRequest = NoteDeletionRequest(notes: notes.isEmpty ? [note] : notes)
+    }
+
+    private func confirmDeletion(_ request: NoteDeletionRequest) {
+        if model.deleteNotes(request.notes.map(\.id)) {
+            resetRangeSelection()
+        }
+    }
+
     private func expand(_ group: NoteFoldGroup) {
         let selectedMemberID = model.selectedNoteID.flatMap { group.noteIDs.contains($0) ? $0 : nil }
         withAnimation(.easeInOut(duration: 0.24)) {
@@ -402,37 +442,45 @@ private struct NoteRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .center, spacing: 7) {
             Image(systemName: fileIcon)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 10, weight: .regular))
                 .foregroundStyle(fileColor)
             Text(note.title.isEmpty ? "未命名笔记" : note.title)
-                .font(AppTypography.rowTitleStrong)
-                .foregroundStyle(.primary)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(0.90))
                 .lineLimit(1)
             Spacer()
             Text(note.updatedAt, style: .time)
-                .font(AppTypography.tertiary)
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 11, weight: .regular))
+                .monospacedDigit()
+                .foregroundStyle(Color.secondary.opacity(0.58))
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 9)
+        .padding(.vertical, 4.5)
+        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            isSelected
-                ? Theme.accent.opacity(0.11)
-                : (isRangeSelected
-                    ? Theme.accent.opacity(0.065)
-                    : (isHovering ? Color.primary.opacity(0.045) : Color.clear)),
-            in: RoundedRectangle(cornerRadius: 7)
-        )
+        .background {
+            NoteListRowBackground(
+                color: backgroundColor,
+                showsAccent: isSelected,
+                accentOpacity: 0.88
+            )
+        }
         .onHover { isHovering = $0 }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected { return Theme.accent.opacity(0.07) }
+        if isRangeSelected { return Theme.accent.opacity(0.04) }
+        if isHovering { return Color.primary.opacity(0.035) }
+        return Color.clear
     }
 
     private var fileIcon: String {
         switch note.kind {
         case .markdown: "doc.text"
         case .request: "bolt.horizontal.circle"
+        case .websocket: "arrow.left.arrow.right.circle"
         case .connection: "cylinder"
         }
     }
@@ -440,8 +488,9 @@ private struct NoteRow: View {
     private var fileColor: Color {
         switch note.kind {
         case .request: .orange
+        case .websocket: .blue
         case .connection: .teal
-        case .markdown: .secondary
+        case .markdown: Color.secondary.opacity(0.68)
         }
     }
 
@@ -453,38 +502,60 @@ private struct FoldGroupRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 7) {
             Image(systemName: "rectangle.compress.vertical")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.accent)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.accent.opacity(0.82))
             Text("折叠 \(count) 个文件")
-                .font(AppTypography.rowTitleStrong)
-                .foregroundStyle(.primary)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(0.90))
             Spacer()
             HStack(spacing: 4) {
                 Text("点击展开")
-                    .font(AppTypography.tertiary)
+                    .font(.system(size: 11, weight: .regular))
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 8, weight: .semibold))
             }
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(Color.secondary.opacity(0.58))
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 9)
+        .padding(.vertical, 4.5)
+        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            isSelected
-                ? Theme.accent.opacity(0.11)
-                : (isHovering ? Theme.accent.opacity(0.07) : Color.primary.opacity(0.025)),
-            in: RoundedRectangle(cornerRadius: 7)
-        )
+        .background {
+            NoteListRowBackground(
+                color: isSelected
+                    ? Theme.accent.opacity(0.07)
+                    : (isHovering ? Color.primary.opacity(0.035) : Color.primary.opacity(0.018)),
+                showsAccent: isSelected,
+                accentOpacity: 0.88
+            )
+        }
         .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(Theme.accent.opacity(isSelected ? 0.22 : 0.12), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(Theme.accent.opacity(isSelected ? 0.14 : 0.08), lineWidth: 0.5)
         }
         .onHover { isHovering = $0 }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("折叠 \(count) 个文件，点击展开")
+    }
+}
+
+private struct NoteListRowBackground: View {
+    let color: Color
+    let showsAccent: Bool
+    let accentOpacity: Double
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(color)
+            if showsAccent {
+                Capsule()
+                    .fill(Theme.accent.opacity(accentOpacity))
+                    .frame(width: 2, height: 14)
+                    .padding(.leading, 2)
+            }
+        }
     }
 }
 

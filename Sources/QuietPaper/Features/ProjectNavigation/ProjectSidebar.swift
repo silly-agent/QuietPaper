@@ -33,19 +33,32 @@ private enum BulkExportTarget: Identifiable {
     }
 }
 
+private enum RequestCreationTarget: Identifiable {
+    case project(UUID)
+    case module(UUID)
+
+    var id: String {
+        switch self {
+        case .project(let id): "project-\(id.uuidString)"
+        case .module(let id): "module-\(id.uuidString)"
+        }
+    }
+}
+
 struct ProjectSidebar: View {
     @EnvironmentObject private var model: AppModel
     @Binding var expanded: Set<UUID>
     @State private var renameTarget: RenameTarget?
     @State private var deleteTarget: DeleteTarget?
     @State private var exportTarget: BulkExportTarget?
+    @State private var requestCreationTarget: RequestCreationTarget?
     @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("项目")
-                    .font(AppTypography.sectionTitle)
+                    .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -55,7 +68,7 @@ struct ProjectSidebar: View {
                     }
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
@@ -63,11 +76,11 @@ struct ProjectSidebar: View {
                 .accessibilityLabel("新建项目")
                 .pointingHandCursor()
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
+                LazyVStack(alignment: .leading, spacing: 1) {
                     ForEach(model.projects) { project in
                         SidebarProjectRow(
                             project: project,
@@ -93,7 +106,7 @@ struct ProjectSidebar: View {
                                 _ = model.createProjectFile(projectID: project.id)
                             },
                             onCreateRequest: {
-                                _ = model.createProjectRequest(projectID: project.id)
+                                requestCreationTarget = .project(project.id)
                             },
                             onCreateConnection: {
                                 _ = model.createProjectConnection(projectID: project.id)
@@ -116,6 +129,10 @@ struct ProjectSidebar: View {
                                 SidebarModuleRow(
                                     module: item,
                                     isSelected: item.id == model.selectedModuleID,
+                                    onCreateRequest: {
+                                        model.selectModule(item.id)
+                                        requestCreationTarget = .module(item.id)
+                                    },
                                     onExport: { exportTarget = .module(item) },
                                     onRename: { renameTarget = .init(id: item.id, kind: .module, currentName: item.name) },
                                     onDelete: { deleteTarget = .init(id: item.id, kind: .module, name: item.name) }
@@ -124,7 +141,7 @@ struct ProjectSidebar: View {
                         }
                     }
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 5)
             }
 
             HairlineDivider()
@@ -132,13 +149,13 @@ struct ProjectSidebar: View {
                 showSettings = true
             } label: {
                 Label("设置", systemImage: "gearshape")
-                    .font(AppTypography.secondary)
+                    .font(.system(size: 12.5, weight: .regular))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .pointingHandCursor()
         }
         .background(Theme.background)
@@ -150,6 +167,12 @@ struct ProjectSidebar: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(model)
+        }
+        .sheet(item: $requestCreationTarget) { target in
+            RequestCreationSheet(
+                onCreateHTTP: { draft in createHTTP(draft, at: target) },
+                onCreateWebSocket: { createWebSocket(at: target) }
+            )
         }
         .alert("移到最近删除？", isPresented: Binding(
             get: { deleteTarget != nil },
@@ -204,6 +227,24 @@ struct ProjectSidebar: View {
         }
     }
 
+    private func createHTTP(_ draft: HTTPRequestDraft, at target: RequestCreationTarget) {
+        switch target {
+        case .project(let projectID):
+            _ = model.createProjectRequest(projectID: projectID, draft: draft)
+        case .module(let moduleID):
+            _ = model.createRequest(draft: draft, moduleID: moduleID)
+        }
+    }
+
+    private func createWebSocket(at target: RequestCreationTarget) {
+        switch target {
+        case .project(let projectID):
+            _ = model.createProjectWebSocketRequest(projectID: projectID)
+        case .module(let moduleID):
+            _ = model.createWebSocketRequest(moduleID: moduleID)
+        }
+    }
+
     private func exportSeparateArchive(_ target: BulkExportTarget) {
         let panel = NSSavePanel()
         if let zipType = UTType(filenameExtension: "zip") {
@@ -244,27 +285,35 @@ private struct SidebarProjectRow: View {
         HStack(spacing: 5) {
             Button(action: onDisclose) {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8.5, weight: .semibold))
+                    .font(.system(size: 8, weight: .semibold))
                     .frame(width: 10)
             }
             .buttonStyle(.plain)
             .pointingHandCursor()
             HStack(spacing: 5) {
                 Image(systemName: "folder")
-                    .font(.system(size: 11))
-                    .foregroundStyle(isSelected ? Theme.accent : .secondary)
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(isSelected ? Theme.accent : Color.secondary.opacity(0.72))
                 Text(project.name)
-                    .font(AppTypography.rowTitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.primary.opacity(0.90))
                     .lineLimit(1)
+                if model.isAIUnreadable(project) {
+                    Image(systemName: "eye.slash")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .help("此项目及其下级内容已标记为 AI 不可读")
+                }
                 Spacer()
             }
             .contentShape(Rectangle())
-            .onTapGesture(count: 2, perform: onDisclose)
             .onTapGesture(count: 1, perform: onSelect)
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 4.5)
-        .background(backgroundStyle, in: RoundedRectangle(cornerRadius: 6))
+        .padding(.vertical, 3.25)
+        .background {
+            SidebarRowBackground(color: backgroundStyle, showsAccent: isSelected)
+        }
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .pointingHandCursor()
@@ -276,6 +325,10 @@ private struct SidebarProjectRow: View {
             Divider()
             Button("一键导出…", action: onExport)
             Divider()
+            Button(project.isAIUnreadable ? "取消AI不可读标记" : "标记AI不可读") {
+                model.setAIUnreadable(kind: .project, id: project.id, value: !project.isAIUnreadable)
+            }
+            Divider()
             Button("重命名", action: onRename)
             Button("上移") { model.moveProject(project.id, offset: -1) }
             Button("下移") { model.moveProject(project.id, offset: 1) }
@@ -285,8 +338,8 @@ private struct SidebarProjectRow: View {
     }
 
     private var backgroundStyle: Color {
-        if isSelected { return Theme.accent.opacity(0.10) }
-        if isHovering { return Color.primary.opacity(0.05) }
+        if isSelected { return Theme.accent.opacity(0.065) }
+        if isHovering { return Color.primary.opacity(0.035) }
         return Color.clear
     }
 }
@@ -300,19 +353,22 @@ private struct SidebarProjectFileRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: fileIcon)
-                .font(.system(size: 11))
+                .font(.system(size: 10, weight: .regular))
                 .foregroundStyle(fileColor)
             Text(note.title)
-                .font(AppTypography.rowTitle)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(Color.primary.opacity(0.84))
                 .lineLimit(1)
             Spacer()
         }
-        .padding(.leading, 30)
+        .padding(.leading, 27)
         .padding(.trailing, 6)
-        .padding(.vertical, 4.5)
-        .background(backgroundStyle, in: RoundedRectangle(cornerRadius: 6))
+        .padding(.vertical, 3.25)
+        .background {
+            SidebarRowBackground(color: backgroundStyle, showsAccent: isSelected)
+        }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
@@ -325,8 +381,8 @@ private struct SidebarProjectFileRow: View {
     }
 
     private var backgroundStyle: Color {
-        if isSelected { return Theme.accent.opacity(0.10) }
-        if isHovering { return Color.primary.opacity(0.05) }
+        if isSelected { return Theme.accent.opacity(0.065) }
+        if isHovering { return Color.primary.opacity(0.035) }
         return Color.clear
     }
 
@@ -334,6 +390,7 @@ private struct SidebarProjectFileRow: View {
         switch note.kind {
         case .markdown: "doc.text"
         case .request: "bolt.horizontal.circle"
+        case .websocket: "arrow.left.arrow.right.circle"
         case .connection: "cylinder"
         }
     }
@@ -341,8 +398,9 @@ private struct SidebarProjectFileRow: View {
     private var fileColor: Color {
         switch note.kind {
         case .request: .orange
+        case .websocket: .blue
         case .connection: .teal
-        case .markdown: isSelected ? Theme.accent : .secondary
+        case .markdown: isSelected ? Theme.accent : Color.secondary.opacity(0.70)
         }
     }
 }
@@ -351,35 +409,54 @@ private struct SidebarModuleRow: View {
     @EnvironmentObject private var model: AppModel
     let module: NoteModule
     let isSelected: Bool
+    let onCreateRequest: () -> Void
     let onExport: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: "folder")
-                .font(.system(size: 11))
-                .foregroundStyle(isSelected ? Theme.accent : .secondary)
+                .font(.system(size: 10.5, weight: .regular))
+                .foregroundStyle(isSelected ? Theme.accent : Color.secondary.opacity(0.72))
             Text(module.name)
-                .font(AppTypography.rowTitle)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(Color.primary.opacity(0.84))
                 .lineLimit(1)
+            if model.isAIUnreadable(module) {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .help(module.isAIUnreadable ? "此模块已标记为 AI 不可读" : "此模块继承了项目的 AI 不可读标记")
+            }
             Spacer()
         }
-        .padding(.leading, 30)
+        .padding(.leading, 27)
         .padding(.trailing, 6)
-        .padding(.vertical, 4.5)
-        .background(backgroundStyle, in: RoundedRectangle(cornerRadius: 6))
+        .padding(.vertical, 3.25)
+        .background {
+            SidebarRowBackground(color: backgroundStyle, showsAccent: isSelected)
+        }
         .contentShape(Rectangle())
         .onTapGesture { model.selectModule(module.id) }
         .onHover { isHovering = $0 }
         .pointingHandCursor()
         .contextMenu {
             Button("新建文件") { _ = model.createNote() }
-            Button("新建请求") { _ = model.createRequest() }
-            Button("新建连接") { _ = model.createConnection() }
+            Button("新建请求", action: onCreateRequest)
+            Button("新建连接") { _ = model.createConnection(moduleID: module.id) }
             Divider()
             Button("一键导出…", action: onExport)
+            Divider()
+            if inheritedAIUnreadableOnly {
+                Button("AI不可读（继承自项目）") {}
+                    .disabled(true)
+            } else {
+                Button(module.isAIUnreadable ? "取消AI不可读标记" : "标记AI不可读") {
+                    model.setAIUnreadable(kind: .module, id: module.id, value: !module.isAIUnreadable)
+                }
+            }
             Divider()
             Button("重命名", action: onRename)
             Button("上移") { model.moveModule(module.id, offset: -1) }
@@ -390,9 +467,32 @@ private struct SidebarModuleRow: View {
     }
 
     private var backgroundStyle: Color {
-        if isSelected { return Theme.accent.opacity(0.10) }
-        if isHovering { return Color.primary.opacity(0.05) }
+        if isSelected { return Theme.accent.opacity(0.065) }
+        if isHovering { return Color.primary.opacity(0.035) }
         return Color.clear
+    }
+
+    private var inheritedAIUnreadableOnly: Bool {
+        !module.isAIUnreadable
+            && model.projects.first(where: { $0.id == module.projectID })?.isAIUnreadable == true
+    }
+}
+
+private struct SidebarRowBackground: View {
+    let color: Color
+    let showsAccent: Bool
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(color)
+            if showsAccent {
+                Capsule()
+                    .fill(Theme.accent.opacity(0.88))
+                    .frame(width: 2, height: 14)
+                    .padding(.leading, 2)
+            }
+        }
     }
 }
 

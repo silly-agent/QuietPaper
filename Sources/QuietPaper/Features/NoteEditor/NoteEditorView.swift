@@ -5,14 +5,32 @@ import UniformTypeIdentifiers
 struct NoteEditorView: View {
     @EnvironmentObject private var model: AppModel
     let isFocusMode: Bool
+    let isHeaderBlurred: Bool
+    let onHeaderHoverChange: (Bool) -> Void
     @State private var editing = true
     @State private var isShowingTablePopover = false
     @State private var tableColumns = 3
     @State private var tableDataRows = 3
-    @StateObject private var editorController = MarkdownEditorController()
+    @State private var isFindPresented = false
+    @State private var findQuery = ""
+    @State private var findSelection = EditorFindSelection()
+    @ObservedObject private var editorController: MarkdownEditorController
+    @FocusState private var isTitleFocused: Bool
+    @FocusState private var isFindFieldFocused: Bool
+    let onFocusChange: (WritingEditorFocusTarget, Bool) -> Void
 
-    init(isFocusMode: Bool = false) {
+    init(
+        isFocusMode: Bool = false,
+        editorController: MarkdownEditorController,
+        isHeaderBlurred: Bool = false,
+        onHeaderHoverChange: @escaping (Bool) -> Void = { _ in },
+        onFocusChange: @escaping (WritingEditorFocusTarget, Bool) -> Void = { _, _ in }
+    ) {
         self.isFocusMode = isFocusMode
+        self.editorController = editorController
+        self.isHeaderBlurred = isHeaderBlurred
+        self.onHeaderHoverChange = onHeaderHoverChange
+        self.onFocusChange = onFocusChange
     }
 
     var body: some View {
@@ -23,13 +41,37 @@ struct NoteEditorView: View {
                 editorSurface
             }
         }
-        .background(Theme.background)
+        .background(isFocusMode ? Color.white : Theme.background)
+        .onChange(of: model.selectedNoteID) { _ in
+            resetFindSession()
+        }
+        .onChange(of: editing) { _ in
+            guard isFindPresented else { return }
+            DispatchQueue.main.async {
+                refreshFindResults(selectFirst: true)
+            }
+        }
+        .onChange(of: model.draftContent) { _ in
+            guard isFindPresented else { return }
+            DispatchQueue.main.async {
+                refreshFindResults(selectFirst: false)
+            }
+        }
+        .onDisappear {
+            onHeaderHoverChange(false)
+            onFocusChange(.title, false)
+            onFocusChange(.body, false)
+        }
     }
 
     private var editorSurface: some View {
         VStack(spacing: 0) {
             if !isFocusMode {
                 editorHeader
+                HairlineDivider()
+            }
+            if isFindPresented {
+                findBar
                 HairlineDivider()
             }
             if editing {
@@ -39,13 +81,19 @@ struct NoteEditorView: View {
                     resolveImage: { path in NSImage(contentsOf: model.attachments.url(for: path)) },
                     documentID: model.selectedNoteID,
                     controller: editorController,
-                    showsScrollIndicators: !isFocusMode
+                    showsScrollIndicators: !isFocusMode,
+                    onFind: presentFind,
+                    onFocusChange: { focused in
+                        onFocusChange(.body, focused)
+                    }
                 )
             } else {
                 MarkdownPreview(
                     markdown: model.draftContent,
                     attachments: model.attachments,
-                    showsScrollIndicators: !isFocusMode
+                    showsScrollIndicators: !isFocusMode,
+                    findQuery: isFindPresented ? findQuery : "",
+                    activeFindMatchIndex: isFindPresented ? findSelection.activeIndex : nil
                 )
             }
             if !isFocusMode {
@@ -53,17 +101,78 @@ struct NoteEditorView: View {
                 statusBar
             }
         }
-        .frame(maxWidth: isFocusMode ? 760 : .infinity, maxHeight: .infinity, alignment: .top)
-        .background(isFocusMode ? Theme.editor : Theme.background)
-        .overlay {
-            if isFocusMode {
-                Rectangle()
-                    .stroke(Color.primary.opacity(0.045), lineWidth: 0.5)
-                    .allowsHitTesting(false)
-            }
-        }
+        .frame(maxWidth: isFocusMode ? 1_280 : .infinity, maxHeight: .infinity, alignment: .top)
+        .background(isFocusMode ? Color.white : Theme.background)
+        .padding(.horizontal, isFocusMode ? 32 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Theme.background)
+        .background(isFocusMode ? Color.white : Theme.background)
+        .background(
+            EditorFindShortcutMonitor(action: presentFind)
+                .frame(width: 0, height: 0)
+        )
+    }
+
+    private var findBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            TextField("查找当前笔记", text: $findQuery)
+                .textFieldStyle(.plain)
+                .font(AppTypography.secondary)
+                .focused($isFindFieldFocused)
+                .onSubmit {
+                    let direction: EditorFindDirection = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+                        ? .previous
+                        : .next
+                    moveFind(direction)
+                }
+                .onChange(of: findQuery) { _ in
+                    refreshFindResults(selectFirst: true)
+                }
+
+            Text(findResultLabel)
+                .font(AppTypography.tertiary)
+                .foregroundStyle(findSelection.matchCount == 0 && !findQuery.isEmpty ? Color.red.opacity(0.82) : Color.secondary)
+                .frame(minWidth: 54, alignment: .trailing)
+
+            findBarButton(icon: "chevron.up", label: "上一处（Shift-Enter）") {
+                moveFind(.previous)
+            }
+            .disabled(findSelection.matchCount == 0)
+
+            findBarButton(icon: "chevron.down", label: "下一处（Enter）") {
+                moveFind(.next)
+            }
+            .disabled(findSelection.matchCount == 0)
+
+            findBarButton(icon: "xmark", label: "关闭查找（Esc）", action: closeFind)
+        }
+        .padding(.horizontal, isFocusMode ? 24 : 16)
+        .frame(height: 36)
+        .background(Theme.control.opacity(0.58))
+        .onExitCommand(perform: closeFind)
+    }
+
+    private var findResultLabel: String {
+        guard !findQuery.isEmpty else { return "" }
+        guard findSelection.matchCount > 0, let activeIndex = findSelection.activeIndex else { return "无结果" }
+        return "\(activeIndex + 1) / \(findSelection.matchCount)"
+    }
+
+    private func findBarButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 10.5, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.secondary)
+        .help(label)
+        .accessibilityLabel(label)
+        .pointingHandCursor()
     }
 
     private var editorHeader: some View {
@@ -82,25 +191,21 @@ struct NoteEditorView: View {
                 Text(model.draftTitle)
                     .foregroundStyle(.primary)
                 Spacer()
-                HStack(spacing: 2) {
-                    modeButton(isEditing: true, icon: "pencil", label: "编辑")
-                    modeButton(isEditing: false, icon: "eye", label: "预览")
+                HStack(spacing: 6) {
+                    HStack(spacing: 0) {
+                        modeButton(isEditing: true, icon: "square.and.pencil", label: "编辑")
+                        modeButton(isEditing: false, icon: "doc.text", label: "预览")
+                    }
+                    .padding(2)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.primary.opacity(0.055), lineWidth: 0.5)
+                    }
+
                     focusModeButton
+                    moreMenu
                 }
-                .padding(2)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
-                Menu {
-                    Button("格式化 JSON") { formatJSON() }
-                    Divider()
-                    Button("导出 Markdown…", action: exportMarkdown)
-                    Button("完整数据备份…", action: backup)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .menuStyle(.borderlessButton)
-                .controlSize(.small)
-                .pointingHandCursor()
             }
             .font(AppTypography.secondary)
             .foregroundStyle(.secondary)
@@ -108,6 +213,10 @@ struct NoteEditorView: View {
             TextField("笔记标题", text: Binding(get: { model.draftTitle }, set: { value in model.setDraftTitle(value) }))
                 .textFieldStyle(.plain)
                 .font(AppTypography.largeTitle)
+                .focused($isTitleFocused)
+                .onChange(of: isTitleFocused) { focused in
+                    onFocusChange(.title, focused)
+                }
 
             if editing {
                 HStack(spacing: 0) {
@@ -119,6 +228,12 @@ struct NoteEditorView: View {
         .padding(.horizontal, 24)
         .padding(.top, 14)
         .padding(.bottom, 12)
+        .contentShape(Rectangle())
+        .onHover(perform: onHeaderHoverChange)
+        .onDisappear {
+            onHeaderHoverChange(false)
+        }
+        .writingFocusBlur(isActive: isHeaderBlurred)
     }
 
     private var statusBar: some View {
@@ -228,17 +343,14 @@ struct NoteEditorView: View {
         return Button {
             editing = isEditing
         } label: {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(isSelected ? Theme.accent : Color.secondary)
-                .frame(width: 24, height: 20)
-                .contentShape(Rectangle())
+            EditorHeaderControlLabel(
+                glyph: .system(icon),
+                isSelected: isSelected,
+                width: 30,
+                height: 28
+            )
         }
-        .buttonStyle(.plain)
-        .background(
-            isSelected ? Theme.accent.opacity(0.12) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 5)
-        )
+        .buttonStyle(EditorHeaderPressStyle())
         .help(label)
         .accessibilityLabel(label)
         .accessibilityValue(isSelected ? "已选择" : "")
@@ -249,23 +361,99 @@ struct NoteEditorView: View {
         Button {
             NotificationCenter.default.post(name: .toggleQuietPaperFocusMode, object: nil)
         } label: {
-            Image(systemName: model.isFocusMode
-                ? "arrow.down.right.and.arrow.up.left"
-                : "arrow.up.left.and.arrow.down.right")
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(model.isFocusMode ? Theme.accent : Color.secondary)
-                .frame(width: 24, height: 20)
-                .contentShape(Rectangle())
+            EditorHeaderControlLabel(
+                glyph: .focusFrame,
+                isSelected: model.isFocusMode,
+                width: 32,
+                height: 32
+            )
         }
-        .buttonStyle(.plain)
-        .background(
-            model.isFocusMode ? Theme.accent.opacity(0.12) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 5)
-        )
+        .buttonStyle(EditorHeaderPressStyle())
         .help(model.isFocusMode ? "退出专注模式（⌘E）" : "专注模式（⌘E）")
         .accessibilityLabel("专注模式")
         .accessibilityValue(model.isFocusMode ? "已开启" : "已关闭")
         .pointingHandCursor()
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            Button("格式化 JSON") { formatJSON() }
+            Divider()
+            Button("导出 Markdown…", action: exportMarkdown)
+            Button("完整数据备份…", action: backup)
+        } label: {
+            EditorHeaderControlLabel(
+                glyph: .system("ellipsis"),
+                isSelected: false,
+                width: 32,
+                height: 32
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .buttonStyle(EditorHeaderPressStyle())
+        .fixedSize()
+        .help("更多操作")
+        .accessibilityLabel("更多操作")
+        .pointingHandCursor()
+    }
+
+    private func presentFind() {
+        isFindPresented = true
+        refreshFindResults(selectFirst: findSelection.activeIndex == nil)
+        DispatchQueue.main.async {
+            isFindFieldFocused = true
+        }
+    }
+
+    private func closeFind() {
+        isFindPresented = false
+        isFindFieldFocused = false
+    }
+
+    private func resetFindSession() {
+        isFindPresented = false
+        isFindFieldFocused = false
+        findQuery = ""
+        findSelection.reset()
+    }
+
+    private func refreshFindResults(selectFirst: Bool) {
+        guard !findQuery.isEmpty else {
+            findSelection.reset()
+            return
+        }
+
+        let count = currentFindMatchCount()
+        findSelection.refresh(matchCount: count, selectFirst: selectFirst)
+        revealCurrentFindMatch()
+    }
+
+    private func moveFind(_ direction: EditorFindDirection) {
+        guard !findQuery.isEmpty else { return }
+        let count = currentFindMatchCount()
+        findSelection.move(direction, matchCount: count)
+        revealCurrentFindMatch()
+        isFindFieldFocused = true
+    }
+
+    private func currentFindMatchCount() -> Int {
+        if editing {
+            return editorController.findRanges(for: findQuery).count
+        }
+        return previewSearchIndex.matches(query: findQuery).count
+    }
+
+    private func revealCurrentFindMatch() {
+        guard editing,
+              let activeIndex = findSelection.activeIndex else { return }
+        let matches = editorController.findRanges(for: findQuery)
+        guard matches.indices.contains(activeIndex) else { return }
+        editorController.revealFindMatch(matches[activeIndex])
+    }
+
+    private var previewSearchIndex: PreviewSearchIndex {
+        PreviewSearchIndex(blocks: MarkdownParser.parse(model.draftContent))
     }
 
     private func chooseImage() {
@@ -319,6 +507,162 @@ struct NoteEditorView: View {
         let timestamp = Int(Date().timeIntervalSince1970)
         let folder = url.appendingPathComponent("QuietPaper-Backup-\(timestamp)", isDirectory: true)
         do { try model.backup(to: folder) } catch { model.startupError = error.localizedDescription }
+    }
+}
+
+private struct EditorFindShortcutMonitor: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.installMonitor()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.action = action
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.removeMonitor()
+    }
+
+    @MainActor
+    final class Coordinator {
+        var action: () -> Void
+        private var monitor: Any?
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        func installMonitor() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                guard modifiers == .command,
+                      event.charactersIgnoringModifiers?.lowercased() == "f" else {
+                    return event
+                }
+                self?.action()
+                return nil
+            }
+        }
+
+        func removeMonitor() {
+            guard let monitor else { return }
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+
+    }
+}
+
+private enum EditorHeaderGlyph {
+    case system(String)
+    case focusFrame
+}
+
+private struct EditorHeaderControlLabel: View {
+    let glyph: EditorHeaderGlyph
+    let isSelected: Bool
+    let width: CGFloat
+    let height: CGFloat
+    @State private var isHovering = false
+
+    private var foregroundColor: Color {
+        isSelected || isHovering ? Theme.accent : Color.secondary
+    }
+
+    private var fillColor: Color {
+        if isSelected { return Theme.accent.opacity(0.13) }
+        if isHovering { return Theme.accent.opacity(0.07) }
+        return .clear
+    }
+
+    private var strokeColor: Color {
+        if isSelected { return Theme.accent.opacity(0.22) }
+        if isHovering { return Theme.accent.opacity(0.14) }
+        return .clear
+    }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7)
+                .fill(fillColor)
+
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(strokeColor, lineWidth: 0.5)
+
+            glyphView
+        }
+        .frame(width: width, height: height)
+        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .shadow(
+            color: isSelected ? Theme.accent.opacity(0.07) : .clear,
+            radius: 1,
+            y: 0.5
+        )
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .animation(.easeOut(duration: 0.14), value: isSelected)
+    }
+
+    @ViewBuilder
+    private var glyphView: some View {
+        switch glyph {
+        case .system(let name):
+            Image(systemName: name)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(foregroundColor)
+        case .focusFrame:
+            FocusFrameGlyph()
+                .stroke(
+                    foregroundColor,
+                    style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
+                )
+                .frame(width: 14, height: 14)
+        }
+    }
+}
+
+private struct EditorHeaderPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+private struct FocusFrameGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let inset: CGFloat = 0.75
+        let arm = min(rect.width, rect.height) * 0.31
+        let minX = rect.minX + inset
+        let maxX = rect.maxX - inset
+        let minY = rect.minY + inset
+        let maxY = rect.maxY - inset
+
+        var path = Path()
+        path.move(to: CGPoint(x: minX, y: minY + arm))
+        path.addLine(to: CGPoint(x: minX, y: minY))
+        path.addLine(to: CGPoint(x: minX + arm, y: minY))
+
+        path.move(to: CGPoint(x: maxX - arm, y: minY))
+        path.addLine(to: CGPoint(x: maxX, y: minY))
+        path.addLine(to: CGPoint(x: maxX, y: minY + arm))
+
+        path.move(to: CGPoint(x: maxX, y: maxY - arm))
+        path.addLine(to: CGPoint(x: maxX, y: maxY))
+        path.addLine(to: CGPoint(x: maxX - arm, y: maxY))
+
+        path.move(to: CGPoint(x: minX + arm, y: maxY))
+        path.addLine(to: CGPoint(x: minX, y: maxY))
+        path.addLine(to: CGPoint(x: minX, y: maxY - arm))
+        return path
     }
 }
 

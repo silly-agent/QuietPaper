@@ -1,5 +1,9 @@
 import Foundation
 
+enum AIReadProtection {
+    static let featureUnavailableMessage = "被标记为 AI 不可读的项目或模块下不可使用此功能"
+}
+
 struct Project: Identifiable, Hashable, Sendable {
     let id: UUID
     var name: String
@@ -7,6 +11,7 @@ struct Project: Identifiable, Hashable, Sendable {
     let createdAt: Date
     var updatedAt: Date
     var deletedAt: Date?
+    var isAIUnreadable: Bool
 }
 
 struct NoteModule: Identifiable, Hashable, Sendable {
@@ -18,11 +23,13 @@ struct NoteModule: Identifiable, Hashable, Sendable {
     var updatedAt: Date
     var deletedAt: Date?
     var isProjectRoot: Bool
+    var isAIUnreadable: Bool
 }
 
 enum DocumentKind: String, Codable, CaseIterable, Sendable {
     case markdown
     case request
+    case websocket
     case connection
 }
 

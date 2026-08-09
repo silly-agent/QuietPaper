@@ -73,7 +73,8 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
             sort_order INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
-            deleted_at REAL
+            deleted_at REAL,
+            is_ai_unreadable INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS modules (
             id TEXT PRIMARY KEY NOT NULL,
@@ -83,7 +84,8 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
             deleted_at REAL,
-            is_project_root INTEGER NOT NULL DEFAULT 0
+            is_project_root INTEGER NOT NULL DEFAULT 0,
+            is_ai_unreadable INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS notes (
             id TEXT PRIMARY KEY NOT NULL,
@@ -140,19 +142,33 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
         if !(try rows("PRAGMA table_info(notes)")).contains(where: { $0.text("name") == "kind" }) {
             try execute("ALTER TABLE notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'markdown'")
         }
+        if !(try rows("PRAGMA table_info(projects)")).contains(where: { $0.text("name") == "is_ai_unreadable" }) {
+            try execute("ALTER TABLE projects ADD COLUMN is_ai_unreadable INTEGER NOT NULL DEFAULT 0")
+        }
+        if !(try rows("PRAGMA table_info(modules)")).contains(where: { $0.text("name") == "is_ai_unreadable" }) {
+            try execute("ALTER TABLE modules ADD COLUMN is_ai_unreadable INTEGER NOT NULL DEFAULT 0")
+        }
         try execute("DELETE FROM note_chunks WHERE note_id IN (SELECT id FROM notes WHERE kind <> 'markdown')")
+        try execute("""
+            DELETE FROM note_chunks WHERE note_id IN (
+                SELECT n.id FROM notes n
+                JOIN modules m ON m.id = n.module_id
+                JOIN projects p ON p.id = m.project_id
+                WHERE m.is_ai_unreadable = 1 OR p.is_ai_unreadable = 1
+            )
+            """)
     }
 
     func fetchProjects() throws -> [Project] {
         try rows("""
-            SELECT id, name, sort_order, created_at, updated_at, deleted_at
+            SELECT id, name, sort_order, created_at, updated_at, deleted_at, is_ai_unreadable
             FROM projects WHERE deleted_at IS NULL ORDER BY sort_order, created_at
         """).compactMap(project(from:))
     }
 
     func fetchModules(projectID: UUID) throws -> [NoteModule] {
         try rows("""
-            SELECT id, project_id, name, sort_order, created_at, updated_at, deleted_at, is_project_root
+            SELECT id, project_id, name, sort_order, created_at, updated_at, deleted_at, is_project_root, is_ai_unreadable
             FROM modules WHERE project_id = ? AND deleted_at IS NULL
             ORDER BY sort_order, created_at
         """, [.text(projectID.uuidString)]).compactMap(module(from:))
@@ -160,7 +176,7 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
 
     func fetchAllModules() throws -> [NoteModule] {
         try rows("""
-            SELECT m.id, m.project_id, m.name, m.sort_order, m.created_at, m.updated_at, m.deleted_at, m.is_project_root
+            SELECT m.id, m.project_id, m.name, m.sort_order, m.created_at, m.updated_at, m.deleted_at, m.is_project_root, m.is_ai_unreadable
             FROM modules m JOIN projects p ON p.id = m.project_id
             WHERE m.deleted_at IS NULL AND p.deleted_at IS NULL
             ORDER BY p.sort_order, m.sort_order, m.created_at
@@ -221,9 +237,9 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
     @discardableResult
     func createProject(name: String) throws -> Project {
         let clean = try validated(name)
-        let project = Project(id: UUID(), name: clean, sortOrder: try nextSortOrder(table: "projects"), createdAt: Date(), updatedAt: Date(), deletedAt: nil)
+        let project = Project(id: UUID(), name: clean, sortOrder: try nextSortOrder(table: "projects"), createdAt: Date(), updatedAt: Date(), deletedAt: nil, isAIUnreadable: false)
         try execute(
-            "INSERT INTO projects VALUES (?, ?, ?, ?, ?, NULL)",
+            "INSERT INTO projects (id, name, sort_order, created_at, updated_at, deleted_at, is_ai_unreadable) VALUES (?, ?, ?, ?, ?, NULL, 0)",
             [.text(project.id.uuidString), .text(project.name), .integer(project.sortOrder), .double(project.createdAt.timeIntervalSince1970), .double(project.updatedAt.timeIntervalSince1970)]
         )
         return project
@@ -233,7 +249,7 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
     func createModule(projectID: UUID, name: String) throws -> NoteModule {
         let clean = try validated(name)
         let order = try scalarInt("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM modules WHERE project_id = ?", [.text(projectID.uuidString)])
-        let item = NoteModule(id: UUID(), projectID: projectID, name: clean, sortOrder: order, createdAt: Date(), updatedAt: Date(), deletedAt: nil, isProjectRoot: false)
+        let item = NoteModule(id: UUID(), projectID: projectID, name: clean, sortOrder: order, createdAt: Date(), updatedAt: Date(), deletedAt: nil, isProjectRoot: false, isAIUnreadable: false)
         try execute(
             "INSERT INTO modules (id, project_id, name, sort_order, created_at, updated_at, deleted_at, is_project_root) VALUES (?, ?, ?, ?, ?, ?, NULL, 0)",
             [.text(item.id.uuidString), .text(projectID.uuidString), .text(item.name), .integer(item.sortOrder), .double(item.createdAt.timeIntervalSince1970), .double(item.updatedAt.timeIntervalSince1970)]
@@ -243,13 +259,13 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
 
     func projectRootModule(projectID: UUID) throws -> NoteModule {
         if let existing = try rows("""
-            SELECT id, project_id, name, sort_order, created_at, updated_at, deleted_at, is_project_root
+            SELECT id, project_id, name, sort_order, created_at, updated_at, deleted_at, is_project_root, is_ai_unreadable
             FROM modules WHERE project_id = ? AND is_project_root = 1 AND deleted_at IS NULL LIMIT 1
         """, [.text(projectID.uuidString)]).compactMap(module(from:)).first {
             return existing
         }
         let now = Date()
-        let item = NoteModule(id: UUID(), projectID: projectID, name: "项目文件", sortOrder: -1, createdAt: now, updatedAt: now, deletedAt: nil, isProjectRoot: true)
+        let item = NoteModule(id: UUID(), projectID: projectID, name: "项目文件", sortOrder: -1, createdAt: now, updatedAt: now, deletedAt: nil, isProjectRoot: true, isAIUnreadable: false)
         try execute(
             "INSERT INTO modules (id, project_id, name, sort_order, created_at, updated_at, deleted_at, is_project_root) VALUES (?, ?, ?, ?, ?, ?, NULL, 1)",
             [.text(item.id.uuidString), .text(projectID.uuidString), .text(item.name), .integer(item.sortOrder), .double(now.timeIntervalSince1970), .double(now.timeIntervalSince1970)]
@@ -304,7 +320,71 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
         try transaction {
             try removeNoteFromFoldGroups(noteID)
             try execute("UPDATE notes SET module_id = ?, updated_at = ? WHERE id = ?", [.text(moduleID.uuidString), .double(Date().timeIntervalSince1970), .text(noteID.uuidString)])
+            if let moved = try note(id: noteID) {
+                try updateFTS(note: moved)
+                try updateChunks(for: moved)
+            }
         }
+    }
+
+    func setAIUnreadable(kind: DeletedItemKind, id: UUID, value: Bool) throws {
+        guard kind != .note else { return }
+        let flag: SQLiteValue = .integer(value ? 1 : 0)
+        let now: SQLiteValue = .double(Date().timeIntervalSince1970)
+        try transaction {
+            switch kind {
+            case .project:
+                try execute(
+                    "UPDATE projects SET is_ai_unreadable = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                    [flag, now, .text(id.uuidString)]
+                )
+                if value {
+                    try execute("""
+                        DELETE FROM note_chunks WHERE note_id IN (
+                            SELECT n.id FROM notes n JOIN modules m ON m.id = n.module_id
+                            WHERE m.project_id = ?
+                        )
+                        """, [.text(id.uuidString)])
+                }
+            case .module:
+                try execute(
+                    "UPDATE modules SET is_ai_unreadable = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                    [flag, now, .text(id.uuidString)]
+                )
+                if value {
+                    try execute(
+                        "DELETE FROM note_chunks WHERE note_id IN (SELECT id FROM notes WHERE module_id = ?)",
+                        [.text(id.uuidString)]
+                    )
+                }
+            case .note:
+                break
+            }
+        }
+    }
+
+    func isAIUnreadable(projectID: UUID) throws -> Bool {
+        try scalarInt(
+            "SELECT COUNT(*) FROM projects WHERE id = ? AND is_ai_unreadable = 1",
+            [.text(projectID.uuidString)]
+        ) > 0
+    }
+
+    func isAIUnreadable(moduleID: UUID) throws -> Bool {
+        try scalarInt("""
+            SELECT COUNT(*) FROM modules m
+            JOIN projects p ON p.id = m.project_id
+            WHERE m.id = ? AND (m.is_ai_unreadable = 1 OR p.is_ai_unreadable = 1)
+            """, [.text(moduleID.uuidString)]) > 0
+    }
+
+    func isAIUnreadable(noteID: UUID) throws -> Bool {
+        try scalarInt("""
+            SELECT COUNT(*) FROM notes n
+            JOIN modules m ON m.id = n.module_id
+            JOIN projects p ON p.id = m.project_id
+            WHERE n.id = ? AND (m.is_ai_unreadable = 1 OR p.is_ai_unreadable = 1)
+            """, [.text(noteID.uuidString)]) > 0
     }
 
     @discardableResult
@@ -373,6 +453,11 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
     }
 
     func softDelete(kind: DeletedItemKind, id: UUID) throws {
+        if kind == .note {
+            try softDeleteNotes(ids: [id])
+            return
+        }
+
         let timestamp = Date().timeIntervalSince1970
         try transaction {
             switch kind {
@@ -384,11 +469,29 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
                 try execute("UPDATE modules SET deleted_at = ? WHERE id = ?", [.double(timestamp), .text(id.uuidString)])
                 try execute("UPDATE notes SET deleted_at = ? WHERE module_id = ? AND deleted_at IS NULL", [.double(timestamp), .text(id.uuidString)])
             case .note:
-                try removeNoteFromFoldGroups(id)
-                try execute("UPDATE notes SET deleted_at = ? WHERE id = ?", [.double(timestamp), .text(id.uuidString)])
+                break
             }
-            try execute("DELETE FROM notes_fts WHERE note_id IN (SELECT id FROM notes WHERE deleted_at IS NOT NULL)")
-            try execute("DELETE FROM note_chunks WHERE note_id IN (SELECT id FROM notes WHERE deleted_at IS NOT NULL)")
+            try removeDeletedNoteIndexes()
+        }
+    }
+
+    func softDeleteNotes(ids: [UUID]) throws {
+        var seen = Set<UUID>()
+        let uniqueIDs = ids.filter { seen.insert($0).inserted }
+        guard !uniqueIDs.isEmpty else { return }
+
+        let placeholders = Array(repeating: "?", count: uniqueIDs.count).joined(separator: ", ")
+        let timestamp = Date().timeIntervalSince1970
+        let values: [SQLiteValue] = [.double(timestamp)] + uniqueIDs.map { .text($0.uuidString) }
+        try transaction {
+            for id in uniqueIDs {
+                try removeNoteFromFoldGroups(id)
+            }
+            try execute(
+                "UPDATE notes SET deleted_at = ? WHERE id IN (\(placeholders)) AND deleted_at IS NULL",
+                values
+            )
+            try removeDeletedNoteIndexes()
         }
     }
 
@@ -468,16 +571,52 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
     }
 
     func search(query: String, scope: SearchScope, projectID: UUID?, moduleID: UUID?) throws -> [NoteSearchResult] {
-        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return [] }
-        if let results = try? ftsSearch(query: clean, scope: scope, projectID: projectID, moduleID: moduleID), !results.isEmpty {
-            return results
-        }
-        return try fallbackSearch(query: clean, scope: scope, projectID: projectID, moduleID: moduleID)
+        try search(query: query, scope: scope, projectID: projectID, moduleID: moduleID, excludesAIUnreadable: false)
     }
 
-    private func ftsSearch(query: String, scope: SearchScope, projectID: UUID?, moduleID: UUID?) throws -> [NoteSearchResult] {
+    func searchForAI(query: String, scope: SearchScope, projectID: UUID?, moduleID: UUID?) throws -> [NoteSearchResult] {
+        try search(query: query, scope: scope, projectID: projectID, moduleID: moduleID, excludesAIUnreadable: true)
+    }
+
+    private func search(
+        query: String,
+        scope: SearchScope,
+        projectID: UUID?,
+        moduleID: UUID?,
+        excludesAIUnreadable: Bool
+    ) throws -> [NoteSearchResult] {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return [] }
+        if let results = try? ftsSearch(
+            query: clean,
+            scope: scope,
+            projectID: projectID,
+            moduleID: moduleID,
+            excludesAIUnreadable: excludesAIUnreadable
+        ), !results.isEmpty {
+            return results
+        }
+        return try fallbackSearch(
+            query: clean,
+            scope: scope,
+            projectID: projectID,
+            moduleID: moduleID,
+            excludesAIUnreadable: excludesAIUnreadable
+        )
+    }
+
+    private func ftsSearch(
+        query: String,
+        scope: SearchScope,
+        projectID: UUID?,
+        moduleID: UUID?,
+        excludesAIUnreadable: Bool
+    ) throws -> [NoteSearchResult] {
         var clauses = ["n.deleted_at IS NULL", "m.deleted_at IS NULL", "p.deleted_at IS NULL", "notes_fts MATCH ?"]
+        if excludesAIUnreadable {
+            clauses.append("m.is_ai_unreadable = 0")
+            clauses.append("p.is_ai_unreadable = 0")
+        }
         let terms = query.split(whereSeparator: { $0.isWhitespace }).map { token in
             "\"\(token.replacingOccurrences(of: "\"", with: "\"\""))\""
         }
@@ -498,8 +637,18 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
         return searchResults(from: resultRows, query: query, excerptColumn: "excerpt")
     }
 
-    private func fallbackSearch(query clean: String, scope: SearchScope, projectID: UUID?, moduleID: UUID?) throws -> [NoteSearchResult] {
+    private func fallbackSearch(
+        query clean: String,
+        scope: SearchScope,
+        projectID: UUID?,
+        moduleID: UUID?,
+        excludesAIUnreadable: Bool
+    ) throws -> [NoteSearchResult] {
         var clauses = ["n.deleted_at IS NULL", "m.deleted_at IS NULL", "p.deleted_at IS NULL", "(n.title LIKE ? ESCAPE '\\' OR n.content_markdown LIKE ? ESCAPE '\\')"]
+        if excludesAIUnreadable {
+            clauses.append("m.is_ai_unreadable = 0")
+            clauses.append("p.is_ai_unreadable = 0")
+        }
         let escaped = clean.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_")
         var values: [SQLiteValue] = [.text("%\(escaped)%"), .text("%\(escaped)%")]
         appendScope(scope, projectID: projectID, moduleID: moduleID, clauses: &clauses, values: &values)
@@ -644,6 +793,7 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
         switch kind {
         case .markdown: MarkdownPlainText.extract(from: content)
         case .request: HTTPRequestDraft.decode(content).searchableText
+        case .websocket: WebSocketRequestDraft.decode(content).searchableText
         case .connection: DatabaseConnectionFile.decode(content).searchableText
         }
     }
@@ -655,6 +805,11 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
     private func removeNoteFromFoldGroups(_ noteID: UUID) throws {
         try execute("DELETE FROM note_fold_group_members WHERE note_id = ?", [.text(noteID.uuidString)])
         try removeUndersizedFoldGroups()
+    }
+
+    private func removeDeletedNoteIndexes() throws {
+        try execute("DELETE FROM notes_fts WHERE note_id IN (SELECT id FROM notes WHERE deleted_at IS NOT NULL)")
+        try execute("DELETE FROM note_chunks WHERE note_id IN (SELECT id FROM notes WHERE deleted_at IS NOT NULL)")
     }
 
     private func removeUndersizedFoldGroups() throws {
@@ -678,12 +833,12 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
 
     private func project(from row: SQLiteRow) -> Project? {
         guard let id = row.uuid("id"), let created = row.date("created_at"), let updated = row.date("updated_at") else { return nil }
-        return Project(id: id, name: row.text("name"), sortOrder: row.int("sort_order"), createdAt: created, updatedAt: updated, deletedAt: row.date("deleted_at"))
+        return Project(id: id, name: row.text("name"), sortOrder: row.int("sort_order"), createdAt: created, updatedAt: updated, deletedAt: row.date("deleted_at"), isAIUnreadable: row.int("is_ai_unreadable") != 0)
     }
 
     private func module(from row: SQLiteRow) -> NoteModule? {
         guard let id = row.uuid("id"), let projectID = row.uuid("project_id"), let created = row.date("created_at"), let updated = row.date("updated_at") else { return nil }
-        return NoteModule(id: id, projectID: projectID, name: row.text("name"), sortOrder: row.int("sort_order"), createdAt: created, updatedAt: updated, deletedAt: row.date("deleted_at"), isProjectRoot: row.int("is_project_root") != 0)
+        return NoteModule(id: id, projectID: projectID, name: row.text("name"), sortOrder: row.int("sort_order"), createdAt: created, updatedAt: updated, deletedAt: row.date("deleted_at"), isProjectRoot: row.int("is_project_root") != 0, isAIUnreadable: row.int("is_ai_unreadable") != 0)
     }
 
     private func note(from row: SQLiteRow) -> Note? {
@@ -791,7 +946,7 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
 
     private func updateChunks(for note: Note) throws {
         try execute("DELETE FROM note_chunks WHERE note_id = ?", [.text(note.id.uuidString)])
-        guard note.kind == .markdown else { return }
+        guard note.kind == .markdown, !(try isAIUnreadable(noteID: note.id)) else { return }
         let bodyText = MarkdownPlainText.extract(from: note.contentMarkdown)
         let pathPrefix = moduleProjectPrefix(moduleID: note.moduleID)
         let plainText = pathPrefix + note.title + "\n\n" + bodyText
@@ -814,10 +969,13 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
 
     func rebuildAllChunks() throws {
         try execute("DELETE FROM note_chunks")
-        try rebuildFTS()
         let all = try rows("""
-            SELECT id, module_id, title, content_markdown, kind, created_at, updated_at, deleted_at
-            FROM notes WHERE deleted_at IS NULL
+            SELECT n.id, n.module_id, n.title, n.content_markdown, n.kind, n.created_at, n.updated_at, n.deleted_at
+            FROM notes n
+            JOIN modules m ON m.id = n.module_id
+            JOIN projects p ON p.id = m.project_id
+            WHERE n.deleted_at IS NULL AND m.deleted_at IS NULL AND p.deleted_at IS NULL
+              AND m.is_ai_unreadable = 0 AND p.is_ai_unreadable = 0
             """).compactMap(note(from:))
         for note in all {
             try updateChunks(for: note)
@@ -829,18 +987,21 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
             SELECT nc.id, nc.note_id, nc.chunk_index, nc.content_text, nc.embedding
             FROM note_chunks nc
             JOIN notes n ON n.id = nc.note_id
-            WHERE n.deleted_at IS NULL AND n.kind = 'markdown'
+            JOIN modules m ON m.id = n.module_id
+            JOIN projects p ON p.id = m.project_id
+            WHERE n.deleted_at IS NULL AND m.deleted_at IS NULL AND p.deleted_at IS NULL
+              AND n.kind = 'markdown' AND m.is_ai_unreadable = 0 AND p.is_ai_unreadable = 0
             """
         var params: [SQLiteValue] = []
         switch scope {
         case .project:
             if let pid = projectID {
-                sql += " AND n.module_id IN (SELECT id FROM modules WHERE project_id = ?)"
+                sql += " AND p.id = ?"
                 params.append(.text(pid.uuidString))
             }
         case .module:
             if let mid = moduleID {
-                sql += " AND n.module_id = ?"
+                sql += " AND m.id = ?"
                 params.append(.text(mid.uuidString))
             }
         case .all:
@@ -874,7 +1035,7 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
             FROM notes n
             JOIN modules m ON m.id = n.module_id
             JOIN projects p ON p.id = m.project_id
-            WHERE n.id = ?
+            WHERE n.id = ? AND m.is_ai_unreadable = 0 AND p.is_ai_unreadable = 0
             """
         guard let row = try rows(sql, [.text(noteID.uuidString)]).first,
               let nid = row.uuid("note_id"),
@@ -896,14 +1057,25 @@ final class WorkspaceDatabase: @unchecked Sendable, NoteSearchService {
 
     private func notesWithoutChunks() throws -> [Note] {
         try rows("""
-            SELECT id, module_id, title, content_markdown, kind, created_at, updated_at, deleted_at
-            FROM notes WHERE deleted_at IS NULL
-            AND id NOT IN (SELECT DISTINCT note_id FROM note_chunks)
+            SELECT n.id, n.module_id, n.title, n.content_markdown, n.kind, n.created_at, n.updated_at, n.deleted_at
+            FROM notes n
+            JOIN modules m ON m.id = n.module_id
+            JOIN projects p ON p.id = m.project_id
+            WHERE n.deleted_at IS NULL AND m.deleted_at IS NULL AND p.deleted_at IS NULL
+              AND m.is_ai_unreadable = 0 AND p.is_ai_unreadable = 0
+              AND n.id NOT IN (SELECT DISTINCT note_id FROM note_chunks)
             """).compactMap(note(from:))
     }
 
     func chunkCount() throws -> Int {
-        try scalarInt("SELECT COUNT(*) FROM note_chunks")
+        try scalarInt("""
+            SELECT COUNT(*) FROM note_chunks nc
+            JOIN notes n ON n.id = nc.note_id
+            JOIN modules m ON m.id = n.module_id
+            JOIN projects p ON p.id = m.project_id
+            WHERE n.deleted_at IS NULL AND m.deleted_at IS NULL AND p.deleted_at IS NULL
+              AND m.is_ai_unreadable = 0 AND p.is_ai_unreadable = 0
+            """)
     }
 
     private func chunkText(_ plainText: String) -> [String] {

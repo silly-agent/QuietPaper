@@ -5,54 +5,102 @@ struct MarkdownPreview: View {
     let markdown: String
     let attachments: AttachmentStore
     var showsScrollIndicators = true
+    var findQuery = ""
+    var activeFindMatchIndex: Int? = nil
 
     var body: some View {
-        ScrollView(showsIndicators: showsScrollIndicators) {
-            LazyVStack(alignment: .leading, spacing: 16) {
-                ForEach(Array(MarkdownParser.parse(markdown).enumerated()), id: \.offset) { _, block in
-                    blockView(block)
+        let blocks = MarkdownParser.parse(markdown)
+        let searchIndex = PreviewSearchIndex(blocks: blocks)
+        let activeMatch = searchIndex.match(at: activeFindMatchIndex, query: findQuery)
+
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: showsScrollIndicators) {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(Array(blocks.enumerated()), id: \.offset) { blockIndex, block in
+                        blockView(
+                            block,
+                            unitIDs: searchIndex.unitIDs(forBlockAt: blockIndex),
+                            activeMatch: activeMatch
+                        )
+                    }
                 }
+                .frame(maxWidth: 860, alignment: .leading)
+                .padding(.horizontal, 36)
+                .padding(.vertical, 24)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .frame(maxWidth: 860, alignment: .leading)
-            .padding(.horizontal, 36)
-            .padding(.vertical, 24)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .onAppear {
+                scrollToActiveMatch(activeMatch, proxy: proxy, animated: false)
+            }
+            .onChange(of: activeMatch) { match in
+                scrollToActiveMatch(match, proxy: proxy, animated: true)
+            }
         }
     }
 
     @ViewBuilder
-    private func blockView(_ block: MarkdownBlock) -> some View {
+    private func blockView(
+        _ block: MarkdownBlock,
+        unitIDs: [Int],
+        activeMatch: PreviewSearchMatch?
+    ) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(inline(text))
+            Text(highlightedInline(text, unitID: unitIDs[0], activeMatch: activeMatch))
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? 8 : 1)
                 .textSelection(.enabled)
+                .id(unitIDs[0])
         case .paragraph(let text):
-            Text(inline(text))
+            Text(highlightedInline(text, unitID: unitIDs[0], activeMatch: activeMatch))
                 .font(AppTypography.body)
                 .bodyTracking()
                 .lineSpacing(7)
                 .textSelection(.enabled)
+                .id(unitIDs[0])
         case .bullets(let items):
             VStack(alignment: .leading, spacing: 9) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("•").font(AppTypography.body).foregroundStyle(Theme.accent.opacity(0.8))
-                        Text(inline(item)).font(AppTypography.body).bodyTracking().lineSpacing(7).textSelection(.enabled)
+                        Text(highlightedInline(item, unitID: unitIDs[index], activeMatch: activeMatch))
+                            .font(AppTypography.body)
+                            .bodyTracking()
+                            .lineSpacing(7)
+                            .textSelection(.enabled)
                     }
+                    .id(unitIDs[index])
                 }
             }
         case .quote(let text):
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 2).fill(Theme.accent.opacity(0.8)).frame(width: 3)
-                Text(inline(text)).font(AppTypography.body).bodyTracking().lineSpacing(7).foregroundStyle(.secondary).italic().textSelection(.enabled)
+                Text(highlightedInline(text, unitID: unitIDs[0], activeMatch: activeMatch))
+                    .font(AppTypography.body)
+                    .bodyTracking()
+                    .lineSpacing(7)
+                    .foregroundStyle(.secondary)
+                    .italic()
+                    .textSelection(.enabled)
             }
             .padding(.vertical, 3)
+            .id(unitIDs[0])
         case .code(let language, let content):
-            CodeBlockView(language: language, content: content)
+            CodeBlockView(
+                language: language,
+                content: content,
+                findQuery: findQuery,
+                searchUnitID: unitIDs[0],
+                activeFindMatch: activeMatch
+            )
+            .id(unitIDs[0])
         case .table(let table):
-            MarkdownTableView(table: table)
+            MarkdownTableView(
+                table: table,
+                findQuery: findQuery,
+                searchUnitIDs: unitIDs,
+                activeFindMatch: activeMatch
+            )
         case .image(let alt, let path):
             if let image = NSImage(contentsOf: attachments.url(for: path)) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -62,7 +110,10 @@ struct MarkdownPreview: View {
                         .frame(maxHeight: 480)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     if !alt.isEmpty {
-                        Text(alt).font(AppTypography.tertiary).foregroundStyle(.tertiary)
+                        Text(highlightedInline(alt, unitID: unitIDs[0], activeMatch: activeMatch))
+                            .font(AppTypography.tertiary)
+                            .foregroundStyle(.tertiary)
+                            .id(unitIDs[0])
                     }
                 }
             } else {
@@ -75,8 +126,32 @@ struct MarkdownPreview: View {
         }
     }
 
-    private func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    private func highlightedInline(
+        _ text: String,
+        unitID: Int,
+        activeMatch: PreviewSearchMatch?
+    ) -> AttributedString {
+        PreviewFindHighlighter.highlight(
+            MarkdownInlineText.attributed(text),
+            query: findQuery,
+            unitID: unitID,
+            activeMatch: activeMatch
+        )
+    }
+
+    private func scrollToActiveMatch(
+        _ match: PreviewSearchMatch?,
+        proxy: ScrollViewProxy,
+        animated: Bool
+    ) {
+        guard let match else { return }
+        if animated {
+            withAnimation(.easeOut(duration: 0.18)) {
+                proxy.scrollTo(match.unitID, anchor: .center)
+            }
+        } else {
+            proxy.scrollTo(match.unitID, anchor: .center)
+        }
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -89,8 +164,11 @@ struct MarkdownPreview: View {
     }
 }
 
-private struct MarkdownTableView: View {
+struct MarkdownTableView: View {
     let table: MarkdownTable
+    var findQuery = ""
+    var searchUnitIDs: [Int] = []
+    var activeFindMatch: PreviewSearchMatch? = nil
 
     private var columnCount: Int {
         max(table.headers.count, table.rows.map(\.count).max() ?? 0)
@@ -99,9 +177,13 @@ private struct MarkdownTableView: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 0) {
-                row(table.headers, isHeader: true)
+                row(table.headers, isHeader: true, unitOffset: 0)
                 ForEach(Array(table.rows.enumerated()), id: \.offset) { index, cells in
-                    row(cells, isHeader: false)
+                    row(
+                        cells,
+                        isHeader: false,
+                        unitOffset: table.headers.count + table.rows.prefix(index).reduce(0) { $0 + $1.count }
+                    )
                         .background(index.isMultiple(of: 2) ? Color.primary.opacity(0.018) : Color.clear)
                 }
             }
@@ -114,10 +196,11 @@ private struct MarkdownTableView: View {
         }
     }
 
-    private func row(_ cells: [String], isHeader: Bool) -> some View {
+    private func row(_ cells: [String], isHeader: Bool, unitOffset: Int) -> some View {
         HStack(spacing: 0) {
             ForEach(0..<columnCount, id: \.self) { index in
-                Text(inline(cell(at: index, in: cells)))
+                let unitID = searchUnitIDs[unitOffset + index]
+                Text(highlightedInline(cell(at: index, in: cells), unitID: unitID))
                     .font(isHeader ? AppTypography.secondary.weight(.semibold) : AppTypography.secondary)
                     .foregroundStyle(isHeader ? Color.primary : Color.secondary)
                     .lineLimit(4)
@@ -131,6 +214,7 @@ private struct MarkdownTableView: View {
                             HairlineDivider(axis: .vertical)
                         }
                     }
+                    .id(unitID)
             }
         }
         .overlay(alignment: .bottom) {
@@ -142,14 +226,22 @@ private struct MarkdownTableView: View {
         index < cells.count ? cells[index] : ""
     }
 
-    private func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    private func highlightedInline(_ text: String, unitID: Int) -> AttributedString {
+        PreviewFindHighlighter.highlight(
+            MarkdownInlineText.attributed(text),
+            query: findQuery,
+            unitID: unitID,
+            activeMatch: activeFindMatch
+        )
     }
 }
 
-private struct CodeBlockView: View {
+struct CodeBlockView: View {
     let language: String
     let content: String
+    var findQuery = ""
+    var searchUnitID: Int? = nil
+    var activeFindMatch: PreviewSearchMatch? = nil
     @State private var copied = false
 
     var body: some View {
@@ -180,7 +272,7 @@ private struct CodeBlockView: View {
             HairlineDivider()
 
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(CodeSyntaxHighlighter.highlight(content, language: language))
+                Text(highlightedCode)
                     .font(AppTypography.monospacedCode)
                     .lineSpacing(4)
                     .textSelection(.enabled)
@@ -194,6 +286,44 @@ private struct CodeBlockView: View {
                 .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var highlightedCode: AttributedString {
+        guard let searchUnitID else {
+            return CodeSyntaxHighlighter.highlight(content, language: language)
+        }
+        return PreviewFindHighlighter.highlight(
+            CodeSyntaxHighlighter.highlight(content, language: language),
+            query: findQuery,
+            unitID: searchUnitID,
+            activeMatch: activeFindMatch
+        )
+    }
+}
+
+private enum PreviewFindHighlighter {
+    static func highlight(
+        _ source: AttributedString,
+        query: String,
+        unitID: Int,
+        activeMatch: PreviewSearchMatch?
+    ) -> AttributedString {
+        guard !query.isEmpty else { return source }
+
+        var output = source
+        let plainText = String(output.characters)
+        for range in EditorFindMatcher.ranges(in: plainText, query: query) {
+            guard let stringRange = Range(range, in: plainText),
+                  let lowerBound = AttributedString.Index(stringRange.lowerBound, within: output),
+                  let upperBound = AttributedString.Index(stringRange.upperBound, within: output) else {
+                continue
+            }
+            let isActive = activeMatch?.unitID == unitID && activeMatch?.range == range
+            output[lowerBound..<upperBound].backgroundColor = isActive
+                ? NSColor.systemOrange.withAlphaComponent(0.62)
+                : NSColor.systemYellow.withAlphaComponent(0.34)
+        }
+        return output
     }
 }
 

@@ -157,6 +157,8 @@ enum ModuleMarkdownExporter {
             return note.contentMarkdown
         case .request:
             return fencedJSON(note.contentMarkdown, label: "HTTP 请求")
+        case .websocket:
+            return fencedJSON(note.contentMarkdown, label: "WebSocket 请求")
         case .connection:
             return fencedJSON(note.contentMarkdown, label: "数据库连接")
         }

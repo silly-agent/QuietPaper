@@ -8,6 +8,7 @@ struct QuietPaperChecks {
         try connectionFilesRoundTripAndRemainSearchable()
         try sqliteShellEscapedPathsNormalize()
         try onlyMarkdownFilesReceiveVectorChunks()
+        try aiUnreadableHierarchyBlocksIndexingAndAIRetrieval()
         try chineseBrandQueryFindsEnglishEmailHeading()
         try queryPolicyAppliesDefaultLimit()
         try dangerousCommandsRequireConfirmation()
@@ -16,6 +17,10 @@ struct QuietPaperChecks {
         try requestDraftRoundTripsAndBuildsURLRequest()
         try getJSONBodyBecomesQueryParameters()
         try requestBuilderRejectsInvalidJSON()
+        try curlImportBuildsHTTPDraft()
+        try curlImportRejectsIncompleteCommands()
+        try webSocketDraftRoundTripsAndRemainsSearchable()
+        try webSocketRequestValidationBuildsHeaders()
         try responseTextFormatsJSONAndKeepsPlainText()
         try await downloadedResponseLoadsFromTemporaryFile()
         try await oversizedDownloadedResponseHasClearError()
@@ -25,18 +30,265 @@ struct QuietPaperChecks {
         try projectFilesRemainOutsideVisibleModules()
         try saveKeepsMarkdownAsSourceOfTruth()
         try noteFoldGroupsPersistAndCleanUp()
+        try batchSoftDeleteNotesIsAtomicAndRecoverable()
         try softDeleteNoteRemovesOnlyItsVectorChunks()
         try softDeleteAndRestoreModuleCascadesToNotes()
         try moduleMarkdownExportSupportsMergedAndSeparateFiles()
         try projectMarkdownExportPreservesHierarchy()
         noteRangeSelectionIsInclusiveAndCancelable()
+        writingFocusBlurOnlyAppliesAwayFromNavigationHover()
+        databaseAssistantMarkdownFormattingKeepsStructure()
+        editorFindMatchesAndPreviewIndexStayOrdered()
         parsesContinuousDocumentBlocks()
         parsesMarkdownTables()
         unclosedFencePreservesCode()
         plainTextRemovesMarkdownFurnitureButKeepsCode()
         normalizesConcatenatedAndRepeatedImages()
         formatsPlainAndFencedJSON()
-        print("Quiet Paper checks passed: 33/33")
+        print("Quiet Paper checks passed: 42/42")
+    }
+
+    static func curlImportBuildsHTTPDraft() throws {
+        let post = try CURLRequestImporter.parse(#"""
+        curl --request POST 'https://api.example.test/users?existing=1' \
+          --header 'Authorization: Bearer local-token' \
+          --header 'Content-Type: application/json' \
+          --data-raw '{"name":"Quiet Paper"}'
+        """#)
+
+        try expect(post.method == .post, "cURL 显式 Method 应导入")
+        try expect(post.url == "https://api.example.test/users?existing=1", "cURL URL 应导入")
+        try expect(post.headers.contains { $0.key == "Authorization" && $0.value == "Bearer local-token" }, "cURL Header 应导入")
+        try expect(post.bodyMode == .json && post.body == #"{"name":"Quiet Paper"}"#, "cURL JSON Body 应导入")
+
+        let get = try CURLRequestImporter.parse("curl -G https://api.example.test/search --data-urlencode 'q=quiet paper' --data 'page=2'")
+        try expect(get.method == .get, "cURL -G 应生成 GET")
+        try expect(get.queryItems.contains { $0.key == "q" && $0.value == "quiet paper" }, "cURL GET 数据应导入 Query")
+        try expect(get.queryItems.contains { $0.key == "page" && $0.value == "2" }, "cURL 多个 GET 数据应全部导入")
+        try expect(get.bodyMode == .none && get.body.isEmpty, "cURL -G 不应保留请求体")
+    }
+
+    static func curlImportRejectsIncompleteCommands() throws {
+        do {
+            _ = try CURLRequestImporter.parse("curl -X POST")
+            throw CheckError.failed("缺少 URL 的 cURL 必须失败")
+        } catch let error as CURLImportError {
+            try expect(error == .missingURL, "缺少 URL 应返回明确错误")
+        }
+
+        do {
+            _ = try CURLRequestImporter.parse("curl 'https://example.test")
+            throw CheckError.failed("引号未闭合的 cURL 必须失败")
+        } catch let error as CURLImportError {
+            try expect(error == .unclosedQuote, "引号未闭合应返回明确错误")
+        }
+    }
+
+    static func webSocketDraftRoundTripsAndRemainsSearchable() throws {
+        let draft = WebSocketRequestDraft(
+            url: "wss://socket.example.test/events",
+            headers: [HTTPKeyValue(key: "Authorization", value: "Bearer local-token")]
+        )
+        let decoded = WebSocketRequestDraft.decode(try draft.encoded())
+        try expect(decoded == draft, "WebSocket 草稿应往返编码")
+
+        let database = try WorkspaceDatabase(inMemory: true)
+        let project = try database.createProject(name: "实时接口")
+        let module = try database.createModule(projectID: project.id, name: "事件流")
+        let note = try database.createNote(
+            moduleID: module.id,
+            title: "通知推送",
+            content: try draft.encoded(),
+            kind: .websocket
+        )
+        try expect(try database.fetchNotes(moduleID: module.id).first?.kind == .websocket, "WebSocket 文件类型应持久化")
+        try expect(
+            try database.search(query: "socket.example", scope: .all, projectID: nil, moduleID: nil).first?.noteID == note.id,
+            "WebSocket URL 应进入全文搜索"
+        )
+    }
+
+    static func webSocketRequestValidationBuildsHeaders() throws {
+        let draft = WebSocketRequestDraft(
+            url: "wss://socket.example.test/events",
+            headers: [
+                HTTPKeyValue(key: "Authorization", value: "Bearer local-token"),
+                HTTPKeyValue(isEnabled: false, key: "X-Ignored", value: "no")
+            ]
+        )
+        let request = try WebSocketClient.makeRequest(draft)
+        try expect(request.url?.scheme == "wss", "WebSocket 请求应保留 wss 协议")
+        try expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer local-token", "WebSocket Header 应导入请求")
+        try expect(request.value(forHTTPHeaderField: "X-Ignored") == nil, "WebSocket 禁用 Header 不应发送")
+
+        do {
+            _ = try WebSocketClient.makeRequest(WebSocketRequestDraft(url: "https://example.test"))
+            throw CheckError.failed("HTTP URL 不能作为 WebSocket 地址")
+        } catch let error as WebSocketClientError {
+            try expect(error == .unsupportedScheme, "WebSocket 应返回明确协议错误")
+        }
+    }
+
+    static func editorFindMatchesAndPreviewIndexStayOrdered() {
+        let ranges = EditorFindMatcher.ranges(in: "Alpha beta alpha", query: "ALPHA")
+        precondition(
+            ranges == [NSRange(location: 0, length: 5), NSRange(location: 11, length: 5)],
+            "查找必须忽略大小写并返回有序 UTF-16 范围"
+        )
+        precondition(
+            EditorFindNavigator.movedIndex(from: nil, matchCount: 2, direction: .next) == 0,
+            "首次向下查找必须定位第一处"
+        )
+        precondition(
+            EditorFindNavigator.movedIndex(from: 1, matchCount: 2, direction: .next) == 0,
+            "向下查找越过末尾后必须回到开头"
+        )
+        precondition(
+            EditorFindNavigator.movedIndex(from: 0, matchCount: 2, direction: .previous) == 1,
+            "向上查找越过开头后必须回到末尾"
+        )
+        precondition(
+            EditorFindNavigator.movedIndex(from: 0, matchCount: 0, direction: .next) == nil,
+            "没有匹配时不能产生无效索引"
+        )
+
+        var selection = EditorFindSelection()
+        selection.refresh(matchCount: 2, selectFirst: true)
+        selection.move(.next, matchCount: 2)
+        precondition(selection.activeIndex == 1, "查找会话必须保留当前匹配位置")
+        selection.refresh(matchCount: 1, selectFirst: true)
+        precondition(
+            selection.activeIndex == 0 && selection.matchCount == 1,
+            "编辑与预览模式切换后必须按新模式重新计算并选择首个匹配"
+        )
+        selection.refresh(matchCount: 0, selectFirst: false)
+        precondition(selection.activeIndex == nil, "新模式没有结果时必须清除当前匹配")
+
+        let markdown = """
+        # **标题**
+
+        这里有 `关键字`
+
+        - 列表关键字
+
+        ```swift
+        let keyword = "关键字"
+        ```
+
+        | 表头 | 状态 |
+        | --- | --- |
+        | 表格关键字 | 完成 |
+
+        ![图片关键字](attachments/example.png)
+        """
+        let units = PreviewSearchIndex.units(from: MarkdownParser.parse(markdown))
+        precondition(
+            units.map(\.text) == [
+                "标题",
+                "这里有 关键字",
+                "列表关键字",
+                "let keyword = \"关键字\"",
+                "表头",
+                "状态",
+                "表格关键字",
+                "完成",
+                "图片关键字"
+            ],
+            "预览查找索引必须按显示顺序包含所有可见文字"
+        )
+        let previewMatches = PreviewSearchIndex.matches(in: units, query: "关键字")
+        precondition(previewMatches.count == 5, "预览索引必须找到段落、列表、代码、表格和图片说明")
+        precondition(
+            previewMatches.map(\.unitID) == [1, 2, 3, 6, 8],
+            "预览匹配必须保留可滚动的显示单元顺序"
+        )
+        let previewIndex = PreviewSearchIndex(blocks: MarkdownParser.parse(markdown))
+        precondition(
+            previewIndex.match(at: 3, query: "关键字")?.unitID == 6,
+            "全局预览匹配索引必须解析到对应的表格显示单元"
+        )
+    }
+
+    static func databaseAssistantMarkdownFormattingKeepsStructure() {
+        let markdown = """
+        查询完成，`projects` 表中共有 **2 个项目**：
+
+        - **爆量海外**
+        - **新项目**
+
+        ```sql
+        SELECT * FROM projects;
+        ```
+        """
+        let blocks = MarkdownParser.parse(markdown)
+        precondition(
+            blocks == [
+                .paragraph("查询完成，`projects` 表中共有 **2 个项目**："),
+                .bullets(["**爆量海外**", "**新项目**"]),
+                .code(language: "sql", content: "SELECT * FROM projects;")
+            ],
+            "数据库助手 Markdown 必须保留段落、列表和代码块结构"
+        )
+
+        let inline = MarkdownInlineText.attributed("`projects` 表中共有 **2 个项目**")
+        precondition(
+            String(inline.characters) == "projects 表中共有 2 个项目",
+            "数据库助手内联 Markdown 不应显示反引号或粗体星号"
+        )
+    }
+
+    static func writingFocusBlurOnlyAppliesAwayFromNavigationHover() {
+        var state = WritingFocusBlurState()
+        precondition(!state.shouldBlurNavigation, "没有编辑焦点时左侧导航必须保持清晰")
+
+        state.setEditorFocus(true, target: .title)
+        precondition(state.shouldBlurNavigation, "标题获得焦点时应雾化左侧导航")
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: true),
+            "标题正在输入时，标题栏和工具栏必须保持清晰"
+        )
+        precondition(
+            !state.shouldBlurNavigation(isEnabled: false),
+            "用户关闭写作聚焦雾化后，编辑焦点不能再触发左侧雾化"
+        )
+
+        state.setNavigationHover(true, region: .projectSidebar)
+        precondition(!state.shouldBlurNavigation, "鼠标进入项目栏时两栏都应恢复清晰")
+        state.setNavigationHover(false, region: .projectSidebar)
+        precondition(state.shouldBlurNavigation, "鼠标移出后若编辑焦点仍在，应重新雾化")
+
+        state.setEditorFocus(true, target: .body)
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: true),
+            "标题焦点尚未结束时不能提前雾化编辑器顶部"
+        )
+        state.setEditorFocus(false, target: .title)
+        precondition(state.shouldBlurNavigation, "标题与正文切换焦点时正文焦点应继续触发雾化")
+        precondition(
+            state.shouldBlurEditorHeader(isEnabled: true),
+            "正文独占焦点时应雾化标题栏和工具栏"
+        )
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: false),
+            "关闭设置后编辑器顶部不能雾化"
+        )
+
+        state.setEditorHeaderHover(true)
+        precondition(
+            !state.shouldBlurEditorHeader(isEnabled: true),
+            "鼠标进入编辑器顶部时必须恢复清晰"
+        )
+        state.setEditorHeaderHover(false)
+        precondition(
+            state.shouldBlurEditorHeader(isEnabled: true),
+            "鼠标移出编辑器顶部后应重新雾化"
+        )
+
+        state.setNavigationHover(true, region: .noteList)
+        precondition(!state.shouldBlurNavigation, "鼠标进入文件栏时两栏都应恢复清晰")
+        state.setNavigationHover(false, region: .noteList)
+        state.setEditorFocus(false, target: .body)
+        precondition(!state.shouldBlurNavigation, "编辑焦点离开后必须解除雾化")
     }
 
     static func noteRangeSelectionIsInclusiveAndCancelable() {
@@ -49,6 +301,14 @@ struct QuietPaperChecks {
 
         selection.select(ids[3], orderedIDs: ids, extendingRange: true)
         precondition(selection.selectedIDs == Set(ids[1...3]), "正向 Shift 选择必须包含锚点和目标")
+        precondition(
+            selection.resolvedActionIDs(for: ids[2], orderedIDs: ids) == Array(ids[1...3]),
+            "在多选范围内打开操作菜单必须解析全部有序文件"
+        )
+        precondition(
+            selection.resolvedActionIDs(for: ids[4], orderedIDs: ids) == [ids[4]],
+            "在多选范围外打开操作菜单只能作用于当前文件"
+        )
 
         selection.select(ids[0], orderedIDs: ids, extendingRange: false)
         precondition(selection.selectedIDs.isEmpty, "多选后普通单击必须立即取消范围")
@@ -217,6 +477,62 @@ struct QuietPaperChecks {
         let chunks = try database.fetchAllChunks(scope: .all, projectID: nil, moduleID: nil)
         try expect(!chunks.isEmpty, "Markdown 文件应生成向量分块")
         try expect(Set(chunks.map(\.noteID)) == [markdown.id], "请求与连接文件不能生成向量分块")
+    }
+
+    static func aiUnreadableHierarchyBlocksIndexingAndAIRetrieval() throws {
+        let database = try WorkspaceDatabase(inMemory: true)
+        let project = try database.createProject(name: "隐私项目")
+        let protectedModule = try database.createModule(projectID: project.id, name: "敏感模块")
+        let readableModule = try database.createModule(projectID: project.id, name: "公开模块")
+        let protectedNote = try database.createNote(
+            moduleID: protectedModule.id,
+            title: "敏感说明",
+            content: "仅用于验证的秘密代号 zephyr-private"
+        )
+        let readableNote = try database.createNote(
+            moduleID: readableModule.id,
+            title: "公开说明",
+            content: "仅用于验证的公开代号 zephyr-public"
+        )
+
+        try database.setAIUnreadable(kind: .module, id: protectedModule.id, value: true)
+        try expect(try database.isAIUnreadable(moduleID: protectedModule.id), "模块显式标记应生效")
+        try expect(try database.isAIUnreadable(noteID: protectedNote.id), "模块标记应由下级文件继承")
+        try expect(!(try database.isAIUnreadable(noteID: readableNote.id)), "同项目其他模块不应受模块标记影响")
+        try expect(
+            try database.search(query: "zephyr-private", scope: .all, projectID: nil, moduleID: nil).first?.noteID == protectedNote.id,
+            "普通全文搜索仍应读取 AI 不可读文件"
+        )
+        try expect(
+            try database.searchForAI(query: "zephyr-private", scope: .all, projectID: nil, moduleID: nil).isEmpty,
+            "AI 关键词检索必须排除受保护模块"
+        )
+
+        var edited = try require(database.note(id: protectedNote.id), "读取受保护文件")
+        edited.contentMarkdown += "\n保存后仍不可索引"
+        try database.save(note: edited)
+        try expect(
+            try database.fetchAllChunks(scope: .module, projectID: project.id, moduleID: protectedModule.id).isEmpty,
+            "保存受保护文件不能重建向量块"
+        )
+
+        try database.rebuildAllChunks()
+        try expect(
+            try database.fetchAllChunks(scope: .module, projectID: project.id, moduleID: protectedModule.id).isEmpty,
+            "全量重建必须跳过受保护模块"
+        )
+        try expect(
+            !(try database.fetchAllChunks(scope: .module, projectID: project.id, moduleID: readableModule.id).isEmpty),
+            "未标记模块仍应进入向量索引"
+        )
+
+        try database.setAIUnreadable(kind: .project, id: project.id, value: true)
+        try expect(try database.isAIUnreadable(moduleID: readableModule.id), "项目标记应由全部模块继承")
+        try expect(try database.fetchAllChunks(scope: .all, projectID: nil, moduleID: nil).isEmpty, "项目标记应清除全部下级向量块")
+
+        try database.setAIUnreadable(kind: .project, id: project.id, value: false)
+        try expect(try database.isAIUnreadable(moduleID: protectedModule.id), "取消项目标记不能清除模块显式标记")
+        try expect(!(try database.isAIUnreadable(moduleID: readableModule.id)), "取消项目标记后普通模块应恢复可读资格")
     }
 
     static func chineseBrandQueryFindsEnglishEmailHeading() throws {
@@ -529,6 +845,42 @@ struct QuietPaperChecks {
         try expect(database.fetchNotes(moduleID: module.id).count == 1, "下级笔记恢复")
         try expect(database.search(query: "可恢复", scope: .all, projectID: nil, moduleID: nil).count == 1, "恢复后重建索引")
         try expect(try database.chunkCount() > 0, "恢复模块后应重新生成 Markdown 向量数据")
+    }
+
+    static func batchSoftDeleteNotesIsAtomicAndRecoverable() throws {
+        let database = try WorkspaceDatabase(inMemory: true)
+        let project = try database.createProject(name: "批量删除测试")
+        let module = try database.createModule(projectID: project.id, name: "内存文件")
+        let first = try database.createNote(
+            moduleID: module.id,
+            title: "待删除甲",
+            content: "仅用于内存数据库的批量删除甲内容"
+        )
+        let second = try database.createNote(
+            moduleID: module.id,
+            title: "待删除乙",
+            content: "仅用于内存数据库的批量删除乙内容"
+        )
+        let kept = try database.createNote(
+            moduleID: module.id,
+            title: "保留文件",
+            content: "批量操作后必须保留的内存测试内容"
+        )
+        _ = try database.createNoteFoldGroup(moduleID: module.id, noteIDs: [first.id, second.id, kept.id])
+
+        try database.softDeleteNotes(ids: [first.id, second.id, first.id])
+
+        try expect(try database.fetchNotes(moduleID: module.id).map(\.id) == [kept.id], "批量删除必须保留未选文件")
+        let deletedNoteIDs = Set(try database.deletedItems().filter { $0.kind == .note }.map(\.id))
+        try expect(deletedNoteIDs == [first.id, second.id], "批量删除必须去重并把全部选中文件移到最近删除")
+        try expect(try database.fetchNoteFoldGroups(moduleID: module.id).isEmpty, "批量删除后不足两个成员的折叠组必须自动解散")
+        try expect(database.search(query: "批量删除甲", scope: .all, projectID: nil, moduleID: nil).isEmpty, "批量删除文件必须退出全文搜索")
+        let remainingChunkNoteIDs = Set(try database.fetchAllChunks(scope: .all, projectID: nil, moduleID: nil).map(\.noteID))
+        try expect(remainingChunkNoteIDs == [kept.id], "批量删除不能清理未选文件的向量数据")
+
+        try database.restore(kind: .note, id: first.id)
+        try database.restore(kind: .note, id: second.id)
+        try expect(Set(try database.fetchNotes(moduleID: module.id).map(\.id)) == [first.id, second.id, kept.id], "批量软删除文件必须可以全部恢复")
     }
 
     static func softDeleteNoteRemovesOnlyItsVectorChunks() throws {

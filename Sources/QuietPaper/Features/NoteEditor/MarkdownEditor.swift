@@ -29,6 +29,30 @@ enum MarkdownTableTemplate {
 @MainActor
 final class MarkdownEditorController: ObservableObject {
     weak var textView: PastingTextView?
+    private var activeDocumentID: UUID?
+    private var viewportSnapshot: MarkdownEditorViewportSnapshot?
+
+    func attach(
+        _ textView: PastingTextView,
+        documentID: UUID?,
+        replacingCurrentEditor: Bool = false
+    ) {
+        guard replacingCurrentEditor || self.textView == nil || self.textView === textView else { return }
+        self.textView = textView
+        activeDocumentID = documentID
+    }
+
+    func captureViewport() {
+        guard let textView else { return }
+        viewportSnapshot = textView.viewportSnapshot(documentID: activeDocumentID)
+    }
+
+    func restoreViewport(in textView: PastingTextView, documentID: UUID?) {
+        guard self.textView === textView,
+              let viewportSnapshot,
+              viewportSnapshot.documentID == documentID else { return }
+        textView.restoreViewport(viewportSnapshot)
+    }
 
     @discardableResult
     func apply(_ command: MarkdownEditorCommand) -> Bool {
@@ -44,6 +68,18 @@ final class MarkdownEditorController: ObservableObject {
     func insertTable(columns: Int, dataRows: Int) -> Bool {
         textView?.insertTable(columns: columns, dataRows: dataRows) ?? false
     }
+
+    func findRanges(for query: String) -> [NSRange] {
+        guard let textView else { return [] }
+        return EditorFindMatcher.ranges(in: textView.string, query: query)
+    }
+
+    @discardableResult
+    func revealFindMatch(_ range: NSRange) -> Bool {
+        guard let textView else { return false }
+        return textView.revealFindMatch(range)
+    }
+
 }
 
 struct MarkdownEditor: NSViewRepresentable {
@@ -53,6 +89,8 @@ struct MarkdownEditor: NSViewRepresentable {
     var documentID: UUID? = nil
     var controller: MarkdownEditorController? = nil
     var showsScrollIndicators = true
+    var onFind: () -> Void = {}
+    var onFocusChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -99,13 +137,14 @@ struct MarkdownEditor: NSViewRepresentable {
         textView.setMarkdown(text, resolveImage: resolveImage)
         textView.onPasteImage = onPasteImage
         textView.resolveImage = resolveImage
+        textView.onFind = onFind
         textView.registerForDraggedTypes([.fileURL, .tiff, .png])
-        controller?.textView = textView
-
         scroll.documentView = textView
+        controller?.attach(textView, documentID: documentID, replacingCurrentEditor: true)
 
         DispatchQueue.main.async {
             textView.window?.makeFirstResponder(textView)
+            controller?.restoreViewport(in: textView, documentID: documentID)
         }
         return scroll
     }
@@ -113,10 +152,11 @@ struct MarkdownEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? PastingTextView else { return }
         context.coordinator.parent = self
-        controller?.textView = textView
+        controller?.attach(textView, documentID: documentID)
         scroll.hasVerticalScroller = showsScrollIndicators
         textView.onPasteImage = onPasteImage
         textView.resolveImage = resolveImage
+        textView.onFind = onFind
         textView.minSize = NSSize(
             width: 0,
             height: max(scroll.contentSize.height, 1)
@@ -131,6 +171,10 @@ struct MarkdownEditor: NSViewRepresentable {
             textView.setMarkdown(text, resolveImage: resolveImage)
             textView.setSelectedRange(NSRange(location: min(selection.location, textView.string.utf16.count), length: 0))
         }
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        coordinator.parent.onFocusChange(false)
     }
 
     @MainActor
@@ -149,6 +193,29 @@ struct MarkdownEditor: NSViewRepresentable {
             synchronizer.editorDidChange(to: markdown)
             parent.text = markdown
         }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.onFocusChange(true)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.onFocusChange(false)
+        }
+    }
+}
+
+struct MarkdownEditorViewportSnapshot: Equatable {
+    let documentID: UUID?
+    let selection: NSRange
+    let topVisibleCharacterIndex: Int?
+    let verticalOffset: CGFloat
+
+    func clampedSelection(textLength: Int) -> NSRange {
+        let location = min(selection.location, textLength)
+        return NSRange(
+            location: location,
+            length: min(selection.length, textLength - location)
+        )
     }
 }
 
@@ -222,6 +289,7 @@ final class PastingTextView: NSTextView {
 
     var onPasteImage: ((NSImage) -> String?)?
     var resolveImage: ((String) -> NSImage?)?
+    var onFind: (() -> Void)?
 
     var markdownString: String {
         let source = attributedString()
@@ -246,14 +314,92 @@ final class PastingTextView: NSTextView {
         return MarkdownImageSyntax.normalized(markdown)
     }
 
+    func viewportSnapshot(documentID: UUID?) -> MarkdownEditorViewportSnapshot {
+        guard let layoutManager,
+              let textContainer,
+              layoutManager.numberOfGlyphs > 0 else {
+            return MarkdownEditorViewportSnapshot(
+                documentID: documentID,
+                selection: selectedRange(),
+                topVisibleCharacterIndex: nil,
+                verticalOffset: 0
+            )
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let visibleRect = enclosingScrollView?.documentVisibleRect ?? visibleRect
+        let containerOrigin = textContainerOrigin
+        let point = NSPoint(
+            x: max(0, visibleRect.minX - containerOrigin.x),
+            y: max(0, visibleRect.minY - containerOrigin.y)
+        )
+        let glyphIndex = min(
+            layoutManager.glyphIndex(for: point, in: textContainer),
+            layoutManager.numberOfGlyphs - 1
+        )
+        let characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        let glyphRect = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyphIndex, length: 1),
+            in: textContainer
+        )
+
+        return MarkdownEditorViewportSnapshot(
+            documentID: documentID,
+            selection: selectedRange(),
+            topVisibleCharacterIndex: characterIndex,
+            verticalOffset: visibleRect.minY - glyphRect.minY - containerOrigin.y
+        )
+    }
+
+    func restoreViewport(_ snapshot: MarkdownEditorViewportSnapshot) {
+        let textLength = string.utf16.count
+        setSelectedRange(snapshot.clampedSelection(textLength: textLength))
+
+        guard let characterIndex = snapshot.topVisibleCharacterIndex,
+              textLength > 0,
+              let layoutManager,
+              let textContainer,
+              let scrollView = enclosingScrollView else { return }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let safeCharacterIndex = min(characterIndex, textLength - 1)
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: safeCharacterIndex)
+        let glyphRect = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyphIndex, length: 1),
+            in: textContainer
+        )
+        let targetY = glyphRect.minY + textContainerOrigin.y + snapshot.verticalOffset
+        let clipView = scrollView.contentView
+        clipView.scroll(to: NSPoint(x: clipView.bounds.minX, y: max(0, targetY)))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "f" {
+            onFind?()
+            return true
+        }
         if modifiers == .command,
            event.charactersIgnoringModifiers?.lowercased() == "v" {
             if pasteImage(from: .general) { return true }
             if pastePlainText(from: .general) { return true }
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    @discardableResult
+    func revealFindMatch(_ range: NSRange) -> Bool {
+        let textLength = (string as NSString).length
+        guard range.location != NSNotFound,
+              range.location <= textLength,
+              NSMaxRange(range) <= textLength else { return false }
+
+        setSelectedRange(range)
+        scrollRangeToVisible(range)
+        showFindIndicator(for: range)
+        return true
     }
 
     override func paste(_ sender: Any?) {

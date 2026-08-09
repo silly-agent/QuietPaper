@@ -6,7 +6,7 @@ struct DatabaseConnectionEditorView: View {
 
     var body: some View {
         if let note = model.selectedNote {
-            DatabaseConnectionWorkspace(note: note) { content in
+            DatabaseConnectionWorkspace(note: note, isAIUnreadable: model.isSelectedNoteAIUnreadable) { content in
                 model.setDraftContent(content)
             }
             .id(note.id)
@@ -19,12 +19,20 @@ struct DatabaseConnectionEditorView: View {
 private struct DatabaseConnectionWorkspace: View {
     @EnvironmentObject private var model: AppModel
     @StateObject private var viewModel: DatabaseConnectionViewModel
+    let isAIUnreadable: Bool
     @State private var input = ""
     @State private var showSetup: Bool
+    @State private var aiTask: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
-    init(note: Note, onSave: @escaping (String) -> Void) {
-        _viewModel = StateObject(wrappedValue: DatabaseConnectionViewModel(noteID: note.id, content: note.contentMarkdown, onSave: onSave))
+    init(note: Note, isAIUnreadable: Bool, onSave: @escaping (String) -> Void) {
+        self.isAIUnreadable = isAIUnreadable
+        _viewModel = StateObject(wrappedValue: DatabaseConnectionViewModel(
+            noteID: note.id,
+            content: note.contentMarkdown,
+            isAIUnreadable: isAIUnreadable,
+            onSave: onSave
+        ))
         _showSetup = State(initialValue: DatabaseConnectionFile.decode(note.contentMarkdown).kind == nil)
     }
 
@@ -71,6 +79,13 @@ private struct DatabaseConnectionWorkspace: View {
             Button("好") { viewModel.errorMessage = nil }
         } message: {
             Text(viewModel.errorMessage ?? "")
+        }
+        .onChange(of: isAIUnreadable) { value in
+            if value {
+                aiTask?.cancel()
+                aiTask = nil
+            }
+            viewModel.setAIUnreadable(value)
         }
     }
 
@@ -202,8 +217,22 @@ private struct DatabaseConnectionWorkspace: View {
         .background(Theme.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    @ViewBuilder
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
+        if viewModel.isAIUnreadable {
+            HStack(spacing: 8) {
+                Image(systemName: "eye.slash")
+                    .foregroundStyle(.secondary)
+                Text("当前项目或模块已标记为 AI 不可读，数据库 AI 助手不可使用。")
+                    .font(AppTypography.secondary)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(Theme.background)
+        } else {
+            HStack(alignment: .bottom, spacing: 10) {
             TextField("用自然语言操作数据库…", text: $input, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(AppTypography.body)
@@ -225,11 +254,12 @@ private struct DatabaseConnectionWorkspace: View {
             .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isThinking)
             .keyboardShortcut(.return, modifiers: .command)
             .pointingHandCursor()
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            .background(Theme.background)
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .background(Theme.background)
     }
 
     private var kindColor: Color {
@@ -252,9 +282,10 @@ private struct DatabaseConnectionWorkspace: View {
 
     private func send() {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty, !viewModel.isAIUnreadable else { return }
         input = ""
-        Task { await viewModel.send(value) }
+        aiTask?.cancel()
+        aiTask = Task { await viewModel.send(value) }
     }
 }
 
@@ -304,10 +335,7 @@ private struct DatabaseMessageView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if let reasoning = displayedReasoning {
                     DisclosureGroup(isExpanded: $reasoningExpanded) {
-                        Text(reasoning)
-                            .font(AppTypography.secondary)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
+                        CompactMarkdownView(markdown: reasoning, style: .reasoning)
                             .padding(.top, 7)
                     } label: {
                         Label("思考过程", systemImage: "brain.head.profile")
@@ -316,11 +344,7 @@ private struct DatabaseMessageView: View {
                     }
                 }
                 if !displayedText.isEmpty {
-                    Text(displayedText)
-                        .font(AppTypography.body)
-                        .bodyTracking()
-                        .lineSpacing(3)
-                        .textSelection(.enabled)
+                    CompactMarkdownView(markdown: displayedText)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 11)
                         .background(Theme.control, in: RoundedRectangle(cornerRadius: 12))
