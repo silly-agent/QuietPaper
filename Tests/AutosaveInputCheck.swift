@@ -56,6 +56,17 @@ struct AutosaveInputCheck {
         precondition(moduleRequest.kind == .request, "模块请求必须使用请求文件类型")
         precondition(moduleRequest.moduleID == module.id, "模块请求必须创建在当前模块")
         precondition(model.selectedNoteID == moduleRequest.id, "创建模块请求后必须自动选中")
+        let importedDraft = HTTPRequestDraft(method: .put, url: "https://import.example.test/items")
+        guard let importedRequest = model.createRequest(named: "导入请求", draft: importedDraft) else {
+            fatalError("无法创建导入请求")
+        }
+        precondition(HTTPRequestDraft.decode(importedRequest.contentMarkdown).method == .put, "导入请求必须保留解析后的配置")
+        guard let socketRequest = model.createWebSocketRequest(named: "实时消息") else {
+            fatalError("无法创建 WebSocket 请求")
+        }
+        precondition(socketRequest.kind == .websocket, "WebSocket 请求必须使用独立文件类型")
+        precondition(socketRequest.moduleID == module.id, "WebSocket 请求必须创建在当前模块")
+        precondition(model.selectedNoteID == socketRequest.id, "创建 WebSocket 请求后必须自动选中")
         guard let foldedNote = model.createNote(named: "待折叠笔记") else {
             fatalError("无法创建待折叠笔记")
         }
@@ -68,6 +79,45 @@ struct AutosaveInputCheck {
         precondition(model.noteFoldGroups.isEmpty, "AppModel 展开折叠组后必须立即刷新发布状态")
         let storedFoldGroups = try database.fetchNoteFoldGroups(moduleID: module.id)
         precondition(storedFoldGroups.isEmpty, "展开状态必须同步到数据库")
-        print("Quiet Paper autosave and project file checks passed: 20/20")
+
+        guard let firstDeleted = model.createNote(named: "批量删除一"),
+              let secondDeleted = model.createNote(named: "批量删除二") else {
+            fatalError("无法创建批量删除内存测试文件")
+        }
+        precondition(model.deleteNotes([firstDeleted.id, secondDeleted.id]), "AppModel 批量删除应返回成功")
+        precondition(!model.notes.contains(where: { $0.id == firstDeleted.id || $0.id == secondDeleted.id }), "AppModel 批量删除后必须立即刷新文件列表")
+        let deletedIDs = Set(model.deletedItems().filter { $0.kind == .note }.map(\.id))
+        precondition(deletedIDs.isSuperset(of: [firstDeleted.id, secondDeleted.id]), "AppModel 批量删除必须把全部文件移到最近删除")
+
+        guard let navigationTarget = model.createModule(projectID: projectID, named: "即时导航目标") else {
+            fatalError("无法创建即时导航测试模块")
+        }
+        model.selectModule(module.id)
+        model.selectNote(moduleRequest.id)
+        let navigationDraft = "切换菜单时必须后台保存的草稿"
+        model.setDraftContent(navigationDraft)
+        model.selectModule(navigationTarget.id)
+        precondition(model.selectedModuleID == navigationTarget.id, "有待保存草稿时，菜单选中状态也必须立即切换")
+        precondition(model.selectedNoteID == nil, "切换到空模块后不应残留旧文件选中态")
+        model.forceSave()
+        let savedNavigationDraft = try database.note(id: moduleRequest.id)?.contentMarkdown
+        precondition(savedNavigationDraft == navigationDraft, "后台导航保存必须写回切换前的文件")
+        model.selectModule(module.id)
+        model.selectNote(moduleRequest.id)
+        precondition(model.draftContent == navigationDraft, "快速切回旧文件时不能显示保存前的过期正文")
+
+        model.setAIUnreadable(kind: .module, id: module.id, value: true)
+        precondition(model.createConnection(moduleID: module.id) == nil, "AI 不可读模块不能新建数据库连接")
+        precondition(
+            model.startupError == AIReadProtection.featureUnavailableMessage,
+            "阻止新建连接时必须给出明确提示"
+        )
+        model.startupError = nil
+        model.setAIUnreadable(kind: .module, id: module.id, value: false)
+        precondition(model.createConnection(moduleID: module.id) != nil, "取消模块标记后应恢复新建连接功能")
+
+        model.setAIUnreadable(kind: .project, id: projectID, value: true)
+        precondition(model.createProjectConnection(projectID: projectID) == nil, "AI 不可读项目不能新建根目录连接")
+        print("Quiet Paper autosave and project file checks passed: 34/34")
     }
 }

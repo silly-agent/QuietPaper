@@ -10,14 +10,16 @@ final class DatabaseConnectionViewModel: ObservableObject {
     @Published var availableMySQLDatabases: [String] = []
     @Published var needsMySQLDatabase = false
     @Published var errorMessage: String?
+    @Published private(set) var isAIUnreadable: Bool
 
     let noteID: UUID
     private let session: DatabaseConnectionSession
     private let onSave: (String) -> Void
 
-    init(noteID: UUID, content: String, onSave: @escaping (String) -> Void) {
+    init(noteID: UUID, content: String, isAIUnreadable: Bool = false, onSave: @escaping (String) -> Void) {
         self.noteID = noteID
         self.file = DatabaseConnectionFile.decode(content)
+        self.isAIUnreadable = isAIUnreadable
         self.onSave = onSave
         self.session = DatabaseConnectionSession()
         self.session.onIdleDisconnect = { [weak self] in
@@ -26,6 +28,15 @@ final class DatabaseConnectionViewModel: ObservableObject {
                 self?.file.messages.append(.init(role: .system, text: "连接因长时间未使用已自动断开，可以点击“重新连接”。"))
                 self?.persist()
             }
+        }
+    }
+
+    func setAIUnreadable(_ value: Bool) {
+        isAIUnreadable = value
+        if value {
+            pendingCommand = nil
+            isThinking = false
+            loadingStage = ""
         }
     }
 
@@ -95,6 +106,7 @@ final class DatabaseConnectionViewModel: ObservableObject {
     func send(_ input: String) async {
         let question = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, let kind = file.kind else { return }
+        guard !isAIUnreadable else { return }
         file.messages.append(.init(role: .user, text: question))
         persist()
         guard status == .connected else {
@@ -108,6 +120,11 @@ final class DatabaseConnectionViewModel: ObservableObject {
         errorMessage = nil
         do {
             let schema = try await session.schemaOverview(kind: kind)
+            guard !Task.isCancelled, !isAIUnreadable else {
+                isThinking = false
+                loadingStage = ""
+                return
+            }
             loadingStage = "DeepSeek V4 Flash 正在思考…"
             let agent = try DeepSeekDatabaseAgent.configured()
             let plan = try await agent.plan(
@@ -117,6 +134,11 @@ final class DatabaseConnectionViewModel: ObservableObject {
                 schema: schema,
                 history: Array(file.messages.dropLast())
             )
+            guard !Task.isCancelled, !isAIUnreadable else {
+                isThinking = false
+                loadingStage = ""
+                return
+            }
             guard let command = plan.command else {
                 file.messages.append(.init(role: .assistant, text: plan.content, reasoning: plan.reasoning))
                 persist()
@@ -153,6 +175,11 @@ final class DatabaseConnectionViewModel: ObservableObject {
                 loadingStage = ""
             }
         } catch {
+            if Task.isCancelled || isAIUnreadable {
+                isThinking = false
+                loadingStage = ""
+                return
+            }
             file.messages.append(.init(role: .assistant, text: "处理失败：\(error.localizedDescription)"))
             persist()
             errorMessage = error.localizedDescription
@@ -162,7 +189,7 @@ final class DatabaseConnectionViewModel: ObservableObject {
     }
 
     func confirmPendingCommand() async {
-        guard let pending = pendingCommand else { return }
+        guard !isAIUnreadable, let pending = pendingCommand else { return }
         pendingCommand = nil
         isThinking = true
         loadingStage = "已确认，正在执行数据库命令…"
@@ -209,7 +236,7 @@ final class DatabaseConnectionViewModel: ObservableObject {
             loadingStage = "正在整理返回结果…"
             var finalText = explanation
             var finalReasoning = reasoning
-            if let agent, let context {
+            if !isAIUnreadable, let agent, let context {
                 if let reply = try? await agent.complete(context: context, result: result) {
                     finalText = reply.content
                     finalReasoning = [reasoning, reply.reasoning].compactMap { $0 }.joined(separator: "\n\n").nonEmpty

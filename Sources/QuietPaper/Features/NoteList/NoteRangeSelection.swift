@@ -30,6 +30,11 @@ struct NoteRangeSelection: Equatable, Sendable {
         if let anchorID, !validIDs.contains(anchorID) { self.anchorID = nil }
     }
 
+    func resolvedActionIDs(for targetID: UUID, orderedIDs: [UUID]) -> [UUID] {
+        guard selectedIDs.count >= 2, selectedIDs.contains(targetID) else { return [targetID] }
+        return orderedIDs.filter(selectedIDs.contains)
+    }
+
     mutating func reset() {
         selectedIDs.removeAll()
         anchorID = nil
