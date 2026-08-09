@@ -4,7 +4,7 @@
   <p>一个把笔记、接口请求和数据库工作台放在本机的 macOS 应用。</p>
 </div>
 
-![Quiet Paper 1.0.31 Markdown 阅读预览](docs/images/releases/1.0.31/01-markdown-preview.jpeg)
+![Quiet Paper Markdown 阅读预览](docs/images/releases/1.0.31/01-markdown-preview.jpeg)
 
 Quiet Paper 适合按“项目 / 模块 / 文件”整理长期资料。它不是云笔记服务，没有账号体系，日常编辑、搜索、附件和备份都直接落在自己的 Mac 上。
 
@@ -22,6 +22,15 @@ Quiet Paper 适合按“项目 / 模块 / 文件”整理长期资料。它不�
 下载对应的 ZIP，解压后把 `QuietPaper.app` 拖入“应用程序”即可。当前公开包使用 ad-hoc 签名；第一次打开时如果 macOS 提示无法验证开发者，请在 Finder 中右键应用并选择“打开”。正式的 Developer ID 签名与 Apple 公证配置完成后，这一步会自动消失。
 
 [查看所有历史版本](https://github.com/silly-agent/QuietPaper/releases)。压缩包旁的 `.sha256` 文件可用于核对下载内容是否完整。
+
+## 1.0.36 更新
+
+- 数据库查询结果只有一列或内容较短时，表格会自然铺满结果卡片，不再缩在中间。
+- 编辑数据库连接时，端口会按原始数字显示，例如 `3307`，不会再显示成 `3,307`。
+- 在笔记标题和“查找当前笔记”输入框中使用 `Command-V`，内容会粘贴到当前输入框，不会误跑到正文。
+- 新建但尚未配置的数据库连接不再自动弹出设置窗口，可以从连接页点击“选择数据库”后再配置。
+
+这些调整只涉及界面显示与输入焦点，不会迁移、清空或重置已有数据库。
 
 ## 能做什么
 

@@ -21,7 +21,7 @@ private struct DatabaseConnectionWorkspace: View {
     @StateObject private var viewModel: DatabaseConnectionViewModel
     let isAIUnreadable: Bool
     @State private var input = ""
-    @State private var showSetup: Bool
+    @State private var showSetup = false
     @State private var aiTask: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
@@ -33,7 +33,6 @@ private struct DatabaseConnectionWorkspace: View {
             isAIUnreadable: isAIUnreadable,
             onSave: onSave
         ))
-        _showSetup = State(initialValue: DatabaseConnectionFile.decode(note.contentMarkdown).kind == nil)
     }
 
     var body: some View {

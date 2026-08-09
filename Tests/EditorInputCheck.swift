@@ -62,6 +62,7 @@ struct EditorInputCheck {
         )!
         precondition(textView.performKeyEquivalent(with: findEvent), "Command-F 必须由编辑器处理")
         precondition(findRequests == 1, "Command-F 必须请求打开查找栏")
+        verifyPasteShortcutFollowsFirstResponder()
 
         textView.setMarkdown("关键字 one 关键字", resolveImage: { _ in nil })
         let findRanges = editorController.findRanges(for: "关键字")
@@ -248,7 +249,41 @@ struct EditorInputCheck {
         verifyTextSynchronization()
         verifyViewportRestoration()
 
-        print("Quiet Paper editor input checks passed: 49/49")
+        print("Quiet Paper editor input checks passed: 50/50")
+    }
+
+    private static func verifyPasteShortcutFollowsFirstResponder() {
+        let editor = PastingTextView(frame: NSRect(x: 0, y: 0, width: 360, height: 160))
+        editor.isRichText = true
+        editor.typingAttributes = PastingTextView.defaultTextAttributes
+        editor.setMarkdown("正文", resolveImage: { _ in nil })
+        editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 170, width: 360, height: 24))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 200))
+        container.addSubview(editor)
+        container.addSubview(input)
+
+        let window = NSWindow(
+            contentRect: container.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = container
+        window.makeKey()
+
+        let pasteboard = NSPasteboard(name: .init("QuietPaperEditorFocusPasteCheck"))
+        pasteboard.clearContents()
+        pasteboard.setString("粘贴内容", forType: .string)
+
+        precondition(window.makeFirstResponder(input), "标题或搜索输入框必须能获得焦点")
+        precondition(!editor.handlePasteShortcut(from: pasteboard), "输入框聚焦时正文不能拦截粘贴")
+        precondition(editor.markdownString == "正文", "输入框粘贴不能写入正文")
+
+        precondition(window.makeFirstResponder(editor), "正文必须能获得焦点")
+        precondition(editor.handlePasteShortcut(from: pasteboard), "正文聚焦时必须正常处理粘贴")
+        precondition(editor.markdownString == "正文粘贴内容", "正文聚焦时粘贴内容必须写入正文")
     }
 
     private static func verifyTextSynchronization() {

@@ -5,5 +5,5 @@
 /// 设置面板的「最新版本」区块直接展示该常量，请勿手动修改。
 enum AppVersion {
     /// 形如 major.minor.patch，例如 "1.0.1"。
-    static let current = "1.0.33"
+    static let current = "1.0.36"
 }

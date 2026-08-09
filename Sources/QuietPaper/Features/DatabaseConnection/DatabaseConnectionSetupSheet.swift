@@ -342,7 +342,7 @@ private struct DatabaseTerminalWizard: View {
                     TextField("例如 127.0.0.1", text: $settings.host)
                 }
                 editField("端口") {
-                    TextField("端口", value: $settings.port, format: .number)
+                    TextField("端口", value: $settings.port, format: .number.grouping(.never))
                         .frame(width: 130)
                 }
             }

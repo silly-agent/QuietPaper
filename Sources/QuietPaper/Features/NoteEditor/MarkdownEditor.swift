@@ -383,10 +383,16 @@ final class PastingTextView: NSTextView {
         }
         if modifiers == .command,
            event.charactersIgnoringModifiers?.lowercased() == "v" {
-            if pasteImage(from: .general) { return true }
-            if pastePlainText(from: .general) { return true }
+            if handlePasteShortcut(from: .general) { return true }
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    @discardableResult
+    func handlePasteShortcut(from pasteboard: NSPasteboard) -> Bool {
+        guard window?.firstResponder === self else { return false }
+        if pasteImage(from: pasteboard) { return true }
+        return pastePlainText(from: pasteboard)
     }
 
     @discardableResult
