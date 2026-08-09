@@ -120,6 +120,16 @@ struct DatabaseQueryResult: Codable, Equatable, Sendable {
     }
 }
 
+enum DatabaseResultColumnLayout {
+    static func expandedWidths(_ contentWidths: [CGFloat], minimumTotalWidth: CGFloat) -> [CGFloat] {
+        guard !contentWidths.isEmpty else { return [] }
+        let contentWidth = contentWidths.reduce(0, +)
+        guard contentWidth < minimumTotalWidth else { return contentWidths }
+        let extraWidth = (minimumTotalWidth - contentWidth) / CGFloat(contentWidths.count)
+        return contentWidths.map { $0 + extraWidth }
+    }
+}
+
 struct DatabaseConversationMessage: Identifiable, Codable, Equatable, Sendable {
     var id = UUID()
     var role: DatabaseMessageRole

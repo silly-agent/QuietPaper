@@ -594,12 +594,16 @@ private struct DatabaseResultView: View {
         }
     }
 
-    private var columnWidths: [CGFloat] {
+    private var measuredColumnWidths: [CGFloat] {
         result.columns.indices.map { index in
             let values = [result.columns[index]] + normalizedRows.map { $0[index] }
             let longest = values.map(visualCharacterCount).max() ?? 12
             return min(max(CGFloat(longest) * 7.4 + 26, 132), 320)
         }
+    }
+
+    private var columnWidths: [CGFloat] {
+        DatabaseResultColumnLayout.expandedWidths(measuredColumnWidths, minimumTotalWidth: 380)
     }
 
     private var viewportWidth: CGFloat {

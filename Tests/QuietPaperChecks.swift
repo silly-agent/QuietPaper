@@ -14,6 +14,7 @@ struct QuietPaperChecks {
         try dangerousCommandsRequireConfirmation()
         try redisPolicyDistinguishesCreateAndOverwrite()
         try emptyQueryResultIsNotReportedAsMutationSuccess()
+        try databaseResultColumnsFillNarrowViewport()
         try requestDraftRoundTripsAndBuildsURLRequest()
         try getJSONBodyBecomesQueryParameters()
         try requestBuilderRejectsInvalidJSON()
@@ -45,7 +46,7 @@ struct QuietPaperChecks {
         plainTextRemovesMarkdownFurnitureButKeepsCode()
         normalizesConcatenatedAndRepeatedImages()
         formatsPlainAndFencedJSON()
-        print("Quiet Paper checks passed: 42/42")
+        print("Quiet Paper checks passed: 43/43")
     }
 
     static func curlImportBuildsHTTPDraft() throws {
@@ -595,6 +596,17 @@ struct QuietPaperChecks {
         )
         try expect(result.compactToolDescription.contains("返回 0 行"), "空查询必须明确返回 0 行")
         try expect(!result.compactToolDescription.contains("执行成功"), "空查询不能伪装成修改命令执行成功")
+    }
+
+    static func databaseResultColumnsFillNarrowViewport() throws {
+        let single = DatabaseResultColumnLayout.expandedWidths([132], minimumTotalWidth: 380)
+        try expect(single == [380], "单列结果应铺满窄结果卡")
+
+        let multiple = DatabaseResultColumnLayout.expandedWidths([132, 148], minimumTotalWidth: 380)
+        try expect(multiple == [182, 198], "多个短列应平均分配结果卡剩余宽度")
+
+        let wide = DatabaseResultColumnLayout.expandedWidths([300, 220], minimumTotalWidth: 380)
+        try expect(wide == [300, 220], "宽表应保留内容列宽并继续横向滚动")
     }
 
     static func requestDraftRoundTripsAndBuildsURLRequest() throws {
